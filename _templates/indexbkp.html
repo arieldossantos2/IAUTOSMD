@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html lang="pt-br">
+<head>
+    <meta charset="UTF-8">
+    <title>Inspeção SMT</title>
+</head>
+<body>
+    <h1>Inspeção de Placas SMT</h1>
+
+    <form method="POST" enctype="multipart/form-data">
+        <label>Imagem de referência (Golden Board):</label><br>
+        <input type="file" name="golden" required><br><br>
+
+        <label>Imagem da placa produzida:</label><br>
+        <input type="file" name="produced" required><br><br>
+
+        <input type="submit" value="Enviar e Inspecionar">
+    </form>
+
+    {% if golden_filename and produced_filename and result_filename %}
+        <h2>Golden Board:</h2>
+        <img src="{{ url_for('static', filename='uploads/' + golden_filename) }}" width="400">
+
+        <h2>Placa Produzida:</h2>
+        <img src="{{ url_for('static', filename='uploads/' + produced_filename) }}" width="400">
+
+        <h2>Diferenças Detectadas:</h2>
+        <img src="{{ url_for('static', filename='uploads/' + result_filename) }}" width="400">
+    {% endif %}
+</body>
+</html>

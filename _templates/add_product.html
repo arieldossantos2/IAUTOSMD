@@ -1,0 +1,313 @@
+<!DOCTYPE html>
+<html lang="pt-br">
+<head>
+<meta charset="UTF-8">
+<title>Cadastro de Produto SMT</title>
+<style>
+    body { font-family: Arial, sans-serif; margin: 20px; line-height: 1.4; }
+    form, #modalContent { margin-bottom: 15px; }
+    input, select, button { margin: 5px 0; padding: 5px; font-size: 14px; }
+    #goldenModal, #loadingModal {
+        display: none; position: fixed; left: 0; top: 0;
+        width: 100%; height: 100%; text-align: center; padding-top: 5%;
+        z-index: 1000; background-color: rgba(0,0,0,0.8);
+        color: #000;
+    }
+    #loadingModal { background-color: rgba(255,255,255,0.8); font-size: 20px; }
+    #modalContent {
+        position: relative; margin: auto; padding: 15px;
+        width: 90%; max-width: 800px; background: #fff;
+        box-sizing: border-box;
+    }
+    #goldenImageContainer { position: relative; display: inline-block; cursor: crosshair; max-width: 100%; }
+    #goldenImage { max-width: 100%; border: 1px solid #ccc; display: block; }
+    .selection-box { position: absolute; box-sizing: border-box; pointer-events: none; z-index: 10; }
+    .fiducial-box { border: 2px dashed blue; background-color: rgba(0,0,255,0.2); }
+    #pointsList, #componentsList { max-height: 120px; overflow-y: auto; border: 1px solid #ccc; padding: 5px; font-size: 13px; }
+    .component-form { border-top: 1px solid #ccc; padding-top: 10px; margin-top: 10px; }
+    .btn { padding: 5px 10px; font-size: 14px; margin-top: 5px; }
+</style>
+<script src="https://cdn.jsdelivr.net/npm/html2canvas@1.0.0-rc.5/dist/html2canvas.min.js"></script>
+</head>
+<body>
+
+<h1>Cadastro de Novo Produto</h1>
+
+<form id="productForm" method="POST" enctype="multipart/form-data">
+    <label>Nome do Produto:</label>
+    <input type="text" name="name" id="productNameInput" required>
+
+    <label>Imagem Golden:</label>
+    <input type="file" name="golden" accept="image/*" id="goldenInput" required>
+
+    <input type="submit" value="Cadastrar Produto" disabled>
+</form>
+
+<div id="loadingModal"><p>Processando imagem... Aguarde.</p></div>
+
+<div id="goldenModal">
+    <div id="modalContent">
+        <h2>Marque os fiduciais e componentes</h2>
+        <div id="goldenImageContainer">
+            <img id="goldenImage">
+        </div>
+
+        <h3>Fiduciais Marcados:</h3>
+        <div id="pointsList"></div>
+        <button class="btn" id="confirmFiducials">Confirmar Fiduciais</button>
+
+        <h3>Componentes Marcados:</h3>
+        <div id="componentsList"></div>
+        <div class="component-form" id="componentFormContainer" style="display:none;">
+            <label>Nome do Componente:</label>
+            <input type="text" id="compName" required>
+            <label>Rotação:</label>
+            <select id="compRotation">
+                <option value="0">0°</option>
+                <option value="90">90°</option>
+                <option value="180">180°</option>
+                <option value="270">270°</option>
+            </select>
+            <label>Package:</label>
+            <input type="text" id="compPackage" required>
+            <button class="btn" id="addComponentBtn">Adicionar Componente</button>
+        </div>
+
+        <input type="hidden" name="fiducials" id="fiducialsInput">
+        <input type="hidden" name="components" id="componentsInput">
+
+        <div><button class="btn" id="finishMarking">Finalizar Marcação</button></div>
+    </div>
+</div>
+
+    <script>
+            const goldenInput = document.getElementById('goldenInput');
+            const goldenModal = document.getElementById('goldenModal');
+            const goldenImage = document.getElementById('goldenImage');
+            const goldenImageContainer = document.getElementById('goldenImageContainer');
+            const pointsList = document.getElementById('pointsList');
+            const componentsList = document.getElementById('componentsList');
+            const fiducialsInput = document.getElementById('fiducialsInput');
+            const componentsInput = document.getElementById('componentsInput');
+            const confirmFiducials = document.getElementById('confirmFiducials');
+            const productForm = document.getElementById('productForm');
+            const loadingModal = document.getElementById('loadingModal');
+    
+            const componentFormContainer = document.getElementById('componentFormContainer');
+            const compName = document.getElementById('compName');
+            const compRotation = document.getElementById('compRotation');
+            const compPackage = document.getElementById('compPackage');
+            const addComponentBtn = document.getElementById('addComponentBtn');
+            const finishMarking = document.getElementById('finishMarking');
+    
+            let fiducials = [];
+            let components = [];
+            let markingFiducials = true;
+            let startX, startY, currentSelectionBox;
+            
+            let originalGoldenFile = null;
+    
+            goldenInput.addEventListener('change', function(){
+                const file = this.files[0];
+                if(file){
+                    originalGoldenFile = file;
+                    loadingModal.style.display = 'block';
+                    const reader = new FileReader();
+                    reader.onload = function(e){
+                        const tempImg = new Image();
+                        tempImg.src = e.target.result;
+                        tempImg.onload = () => {
+                            const formData = new FormData();
+                            formData.append('image', file);
+                            
+                            fetch('/crop_board', {
+                                method: 'POST',
+                                body: formData
+                            })
+                            .then(response => response.json())
+                            .then(data => {
+                                if(data.error) {
+                                    alert(data.error);
+                                    loadingModal.style.display = 'none';
+                                    return;
+                                }
+                                goldenImage.src = 'data:image/jpeg;base64,' + data.cropped_image;
+                                goldenImage.onload = () => {
+                                    loadingModal.style.display = 'none';
+                                    goldenModal.style.display = 'block';
+                                    fiducials = [];
+                                    components = [];
+                                    pointsList.innerHTML = '';
+                                    componentsList.innerHTML = '';
+                                    clearSelectionBoxes();
+                                    markingFiducials = true;
+                                    alert('Marque os fiduciais (clique e arraste) e clique em "Confirmar Fiduciais" quando terminar.');
+                                };
+                            })
+                            .catch(error => {
+                                alert('Erro ao processar imagem.');
+                                loadingModal.style.display = 'none';
+                            });
+                        };
+                    }
+                    reader.readAsDataURL(file);
+                }
+            });
+        
+            goldenImageContainer.addEventListener('mousedown', function(e){
+                e.preventDefault();
+                const rect = goldenImage.getBoundingClientRect();
+                startX = Math.round(e.clientX - rect.left);
+                startY = Math.round(e.clientY - rect.top);
+        
+                currentSelectionBox = document.createElement('div');
+                currentSelectionBox.className = 'selection-box' + (markingFiducials ? ' fiducial-box' : '');
+                currentSelectionBox.style.left = startX + 'px';
+                currentSelectionBox.style.top = startY + 'px';
+                goldenImageContainer.appendChild(currentSelectionBox);
+            });
+        
+            goldenImageContainer.addEventListener('mousemove', function(e){
+                if(!currentSelectionBox) return;
+                const rect = goldenImage.getBoundingClientRect();
+                const currentX = Math.round(e.clientX - rect.left);
+                const currentY = Math.round(e.clientY - rect.top);
+        
+                const width = currentX - startX;
+                const height = currentY - startY;
+        
+                currentSelectionBox.style.width = Math.abs(width) + 'px';
+                currentSelectionBox.style.height = Math.abs(height) + 'px';
+                currentSelectionBox.style.left = (width > 0 ? startX : currentX) + 'px';
+                currentSelectionBox.style.top = (height > 0 ? startY : currentY) + 'px';
+            });
+        
+            goldenImageContainer.addEventListener('mouseup', function(e){
+                if(!currentSelectionBox) return;
+                const rect = goldenImage.getBoundingClientRect();
+                const endX = Math.round(e.clientX - rect.left);
+                const endY = Math.round(e.clientY - rect.top);
+                
+                const x = Math.min(startX, endX);
+                const y = Math.min(startY, endY);
+                const w = Math.abs(endX - startX);
+                const h = Math.abs(endY - startY);
+        
+                if(w < 10 || h < 10) {
+                    goldenImageContainer.removeChild(currentSelectionBox);
+                    currentSelectionBox = null;
+                    return;
+                }
+        
+                const box = { x, y, width: w, height: h };
+                
+                if (markingFiducials) {
+                    fiducials.push(box);
+                    const li = document.createElement('div');
+                    li.textContent = `Fiducial ${fiducials.length}: x=${x}, y=${y}, w=${w}, h=${h}`;
+                    pointsList.appendChild(li);
+                } else {
+                    currentComponentClick = box;
+                    componentFormContainer.style.display = 'block';
+                    compName.focus();
+                }
+                currentSelectionBox = null;
+            });
+        
+            addComponentBtn.addEventListener('click', function(e){
+                e.preventDefault();
+                if(!compName.value || !compPackage.value || currentComponentClick==null){
+                    alert('Preencha todos os campos do componente');
+                    return;
+                }
+                const comp = {
+                    name: compName.value,
+                    x: currentComponentClick.x,
+                    y: currentComponentClick.y,
+                    rotation: parseInt(compRotation.value),
+                    package: compPackage.value,
+                    width: currentComponentClick.width,
+                    height: currentComponentClick.height
+                };
+                components.push(comp);
+        
+                const li = document.createElement('li');
+                li.textContent = `Componente: ${comp.name}, x=${comp.x}, y=${comp.y}, w=${comp.width}, h=${comp.height}`;
+                componentsList.appendChild(li);
+        
+                componentsInput.value = JSON.stringify(components);
+                
+                compName.value = '';
+                compRotation.value = 0;
+                compPackage.value = '';
+                currentComponentClick = null;
+                componentFormContainer.style.display = 'none';
+            });
+        
+            confirmFiducials.addEventListener('click', function(){
+                if(fiducials.length < 2){
+                    alert('Marque pelo menos 2 fiduciais');
+                    return;
+                }
+                fiducialsInput.value = JSON.stringify(fiducials);
+                markingFiducials = false;
+                alert('Fiduciais confirmados! Agora marque os componentes.');
+            });
+        
+            finishMarking.addEventListener('click', async function(){
+                if(components.length < 1){
+                    alert('Marque pelo menos 1 componente antes de finalizar!');
+                    return;
+                }
+                
+                const productName = document.getElementById('productNameInput').value;
+                if (!productName || !originalGoldenFile) {
+                    alert('Por favor, preencha o nome do produto e selecione a imagem golden.');
+                    goldenModal.style.display = 'none';
+                    return;
+                }
+                
+                goldenModal.style.display = 'none';
+                loadingModal.style.display = 'block';
+        
+                // Pega a imagem golden recortada da tela
+                try {
+                    const canvas = await html2canvas(goldenImageContainer);
+                    const blob = await new Promise(resolve => canvas.toBlob(resolve, 'image/jpeg'));
+                    
+                    const formData = new FormData();
+                    formData.append('name', productName);
+                    // Aqui a correção: usa o Blob criado e o nome do arquivo original
+                    formData.append('golden', blob, originalGoldenFile.name);
+                    formData.append('fiducials', JSON.stringify(fiducials));
+                    formData.append('components', JSON.stringify(components));
+        
+                    const response = await fetch('/add_product', {
+                        method: 'POST',
+                        body: formData
+                    });
+                    
+                    const result = await response.json();
+                    
+                    loadingModal.style.display = 'none';
+                    if (response.ok) {
+                        alert('Produto cadastrado com sucesso!');
+                        window.location.href = '/';
+                    } else {
+                        alert('Erro no cadastro: ' + result.error);
+                    }
+                } catch (error) {
+                    loadingModal.style.display = 'none';
+                    alert('Ocorreu um erro de rede. Verifique o servidor.');
+                    console.error('Erro:', error);
+                }
+            });
+        
+            function clearSelectionBoxes() {
+                const boxes = goldenImageContainer.querySelectorAll('.selection-box');
+                boxes.forEach(box => box.remove());
+            }
+        </script>
+
+</body>
+</html>

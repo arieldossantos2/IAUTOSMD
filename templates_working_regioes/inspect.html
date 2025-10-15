@@ -1,0 +1,187 @@
+{% extends "base.html" %}
+
+{% block title %}Inspecionar Placa{% endblock %}
+
+{% block content %}
+<div class="max-w-4xl mx-auto p-6 bg-white rounded-xl shadow-lg">
+    <h1 class="text-3xl font-bold mb-6 text-center">Inspecionar Placa</h1>
+    
+    <form id="inspectForm" class="space-y-6" enctype="multipart/form-data">
+        <div>
+            <label for="product_id" class="block text-sm font-medium text-gray-700">Selecione o Produto:</label>
+            <select id="product_id" name="product_id" required class="mt-1 block w-full pl-3 pr-10 py-2 text-base border-gray-300 focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 rounded-md">
+                <option value="" disabled selected>Escolha um produto</option>
+                {% for product in products %}
+                    <option value="{{ product.id }}">{{ product.name }}</option>
+                {% endfor %}
+            </select>
+        </div>
+        
+        <div>
+            <label for="produced" class="block text-sm font-medium text-gray-700">Selecione a Imagem da Placa a ser Inspecionada:</label>
+            <div class="mt-1 flex justify-center px-6 pt-5 pb-6 border-2 border-gray-300 border-dashed rounded-md">
+                <div class="space-y-1 text-center">
+                    <svg class="mx-auto h-12 w-12 text-gray-400" stroke="currentColor" fill="none" viewBox="0 0 48 48" aria-hidden="true">
+                        <path d="M28 8H12a4 4 0 00-4 4v20m32-12v8m0 0v8a4 4 0 01-4 4H12a4 4 0 01-4-4v-4m32-4l-3.172-3.172a4 4 0 00-5.656 0L28 28M8 32l9.172-9.172a4 4 0 015.656 0L28 28m0 0l4 4m4-24h8m-4-4v8m-12 4h.02" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" />
+                    </svg>
+                    <div class="flex text-sm text-gray-600">
+                        <label for="produced" class="relative cursor-pointer bg-white rounded-md font-medium text-indigo-600 hover:text-indigo-500 focus-within:outline-none focus-within:ring-2 focus-within:ring-offset-2 focus-within:ring-indigo-500">
+                            <span>Carregar um arquivo</span>
+                            <input id="produced" name="produced" type="file" class="sr-only" required accept="image/*">
+                        </label>
+                        <p class="pl-1">ou arrastar e soltar</p>
+                    </div>
+                    <p class="text-xs text-gray-500">PNG, JPG, GIF até 10MB</p>
+                </div>
+            </div>
+        </div>
+
+        <button type="submit" class="w-full btn-primary" id="inspectButton">
+            <span id="buttonText">Executar Inspeção</span>
+            <span id="spinner" class="hidden h-5 w-5 border-2 border-white border-t-transparent rounded-full animate-spin"></span>
+        </button>
+    </form>
+    
+    <div id="loadingMessage" class="hidden mt-6 text-center text-gray-600">
+        <p>Inspecionando a placa... Isso pode levar alguns segundos.</p>
+    </div>
+    
+    <div id="resultContainer" class="mt-8 hidden">
+        <h2 class="text-2xl font-bold mb-4">Resultado da Inspeção</h2>
+        
+        <div class="flex justify-around items-center text-center font-bold text-xl mb-4">
+            <div class="text-green-600">
+                <span id="totalOk">0</span> Componentes OK
+            </div>
+            <div class="text-red-600">
+                <span id="totalFail">0</span> Componentes COM FALHA
+            </div>
+        </div>
+        
+        <div class="mb-6">
+            <h3 class="text-xl font-semibold mb-2">Imagem do Resultado:</h3>
+            <img id="resultImage" src="" alt="Imagem do resultado da inspeção" class="rounded-lg shadow-md max-w-full h-auto">
+        </div>
+
+        <div id="visualInspectionContainer" class="mt-8">
+            <h3 class="text-xl font-semibold mb-4">Análise Visual dos Componentes</h3>
+            <div id="componentsGrid" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+                </div>
+        </div>
+    </div>
+    
+</div>
+
+<script>
+    document.getElementById('inspectForm').addEventListener('submit', async function(event) {
+        event.preventDefault();
+        
+        const form = event.target;
+        const formData = new FormData(form);
+        const button = document.getElementById('inspectButton');
+        const buttonText = document.getElementById('buttonText');
+        const spinner = document.getElementById('spinner');
+        const loadingMessage = document.getElementById('loadingMessage');
+        const resultContainer = document.getElementById('resultContainer');
+        const componentsGrid = document.getElementById('componentsGrid');
+        
+        resultContainer.classList.add('hidden');
+        button.disabled = true;
+        buttonText.classList.add('hidden');
+        spinner.classList.remove('hidden');
+        loadingMessage.classList.remove('hidden');
+        
+        try {
+            const response = await fetch('/inspect', {
+                method: 'POST',
+                body: formData
+            });
+
+            if (!response.ok) {
+                const errorText = await response.text();
+                throw new Error(errorText || `Erro do servidor: ${response.status} ${response.statusText}`);
+            }
+
+            const result = await response.json();
+
+            if (result.error) {
+                throw new Error(result.error);
+            }
+
+            document.getElementById('totalOk').textContent = result.total_ok;
+            document.getElementById('totalFail').textContent = result.total_fail;
+            document.getElementById('resultImage').src = `/static/uploads/${result.result_filename}`;
+            
+            componentsGrid.innerHTML = '';
+            
+            result.detailed_components.forEach(comp => {
+                const statusColor = comp.status === 'OK' ? 'text-green-600' : 'text-red-600';
+                
+                let inspectionDetailsHtml = '';
+                if (comp.inspection_details && Array.isArray(comp.inspection_details)) {
+                    inspectionDetailsHtml = '<h5 class="text-sm font-bold mt-2">Detalhes:</h5>';
+                    comp.inspection_details.forEach(detail => {
+                        const detailStatusColor = detail.status === 'OK' ? 'text-green-500' : 'text-red-500';
+                        const goldenImg = `data:image/png;base64,${detail.roi_g}`;
+                        const producedImg = `data:image/png;base64,${detail.roi_p}`;
+
+                        inspectionDetailsHtml += `
+                            <div class="flex items-center space-x-2 mt-2">
+                                <span class="font-semibold">Região ${detail.region_id + 1}:</span>
+                                <span class="${detailStatusColor}">${detail.status}</span>
+                            </div>
+                            <div class="flex justify-around items-center mt-2">
+                                <div class="text-center">
+                                    <span class="block text-xs font-semibold mb-1">Golden</span>
+                                    <img src="${goldenImg}" alt="Golden Region" class="w-16 h-16 object-contain rounded-md border-2 border-gray-200">
+                                </div>
+                                <div class="text-center">
+                                    <span class="block text-xs font-semibold mb-1">Inspecionado</span>
+                                    <img src="${producedImg}" alt="Produced Region" class="w-16 h-16 object-contain rounded-md border-2 border-gray-200">
+                                </div>
+                            </div>
+                        `;
+                    });
+                } else {
+                    // Fallback to old behavior if no inspection_details exist
+                    inspectionDetailsHtml = `
+                        <div class="flex justify-around items-center mb-4">
+                            <div class="text-center">
+                                <span class="block text-sm font-semibold mb-1">Golden</span>
+                                <img src="data:image/png;base64,${comp.golden_image}" alt="Imagem Golden" class="w-24 h-24 object-contain rounded-md border-2 border-gray-200">
+                            </div>
+                            <div class="text-center">
+                                <span class="block text-sm font-semibold mb-1">Inspecionado</span>
+                                <img src="data:image/png;base64,${comp.produced_image}" alt="Imagem Inspecionada" class="w-24 h-24 object-contain rounded-md border-2 border-gray-200">
+                            </div>
+                        </div>
+                    `;
+                }
+
+                const cardHtml = `
+                    <div class="bg-gray-50 p-4 rounded-lg shadow-sm">
+                        <h4 class="font-bold text-lg mb-2">${comp.name} - <span class="${statusColor}">${comp.status}</span></h4>
+                        ${inspectionDetailsHtml}
+                        <div class="flex justify-center space-x-2 mt-4">
+                            <button class="flex-1 btn-success text-sm py-2" data-component-id="${comp.name}">GOOD</button>
+                            <button class="flex-1 btn-danger text-sm py-2" data-component-id="${comp.name}">FAIL</button>
+                        </div>
+                    </div>
+                `;
+                componentsGrid.innerHTML += cardHtml;
+            });
+
+            resultContainer.classList.remove('hidden');
+
+        } catch (error) {
+            console.error('Erro na requisição:', error);
+            alert('Erro ao inspecionar a placa: ' + error.message);
+        } finally {
+            button.disabled = false;
+            buttonText.classList.remove('hidden');
+            spinner.classList.add('hidden');
+            loadingMessage.classList.add('hidden');
+        }
+    });
+</script>
+{% endblock %}
