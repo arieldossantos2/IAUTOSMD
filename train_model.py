@@ -13,17 +13,28 @@ import os
 def get_db_connection():
     return mysql.connector.connect(host="localhost", user="flaskuser", password="123456", database="smt_inspection_new")
 
-# --- Helper de Conversão ---
-def base64_to_tensor(b64):
-    if not b64: return torch.zeros(3, 64, 64)
-    img_bytes = base64.b64decode(b64)
-    np_arr = np.frombuffer(img_bytes, np.uint8)
-    img = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
-    if img is None: return torch.zeros(3, 64, 64)
-    img = cv2.resize(img, (64, 64))
-    return torch.tensor(img).permute(2, 0, 1).float() / 255.0
+# --- SUGESTÃO 3: Helper de Conversão ATUALIZADO (lê caminho ou imagem) ---
+def path_to_tensor(data, is_path=True):
+    """Converte um caminho de arquivo de imagem ou um array de imagem em um tensor."""
+    try:
+        if is_path:
+            if not data or not os.path.exists(data): 
+                print(f"Aviso: Caminho da imagem não encontrado: {data}")
+                return torch.zeros(3, 64, 64)
+            img = cv2.imread(data)
+        else:
+            img = data # Assume que 'data' já é um array numpy (para inferência)
 
-# --- Dataset para Múltiplas Tarefas ---
+        if img is None: 
+            return torch.zeros(3, 64, 64)
+            
+        img = cv2.resize(img, (64, 64))
+        return torch.tensor(img).permute(2, 0, 1).float() / 255.0
+    except Exception as e:
+        print(f"Erro ao processar imagem: {e}")
+        return torch.zeros(3, 64, 64)
+
+# --- Dataset para Classificação (lê caminhos) ---
 class InspectionDataset(Dataset):
     def __init__(self, samples):
         self.samples = samples
@@ -33,17 +44,13 @@ class InspectionDataset(Dataset):
 
     def __getitem__(self, idx):
         s = self.samples[idx]
-        prod_img = base64_to_tensor(s['produced_base64'])
+        # --- SUGESTÃO 3: Usa path_to_tensor ---
+        prod_img = path_to_tensor(s['produced_path'], is_path=True)
         label_class = torch.tensor(1.0 if s['label'] == 'GOOD' else 0.0, dtype=torch.float32)
         
-        # NOTA: Para treinar rotação e deslocamento, você precisaria ter esses
-        # dados anotados no seu banco de dados. Por enquanto, usamos placeholders.
-        label_rot = torch.tensor(0.0, dtype=torch.float32) # Placeholder
-        label_disp = torch.tensor([0.0, 0.0], dtype=torch.float32) # Placeholder
-        
-        return prod_img, {'class': label_class, 'rot': label_rot, 'disp': label_disp}
+        return prod_img, label_class
 
-# --- Modelo MultiTaskCNN (Novo) ---
+# --- Modelo CNN (Simplificado para Classificação) ---
 class MultiTaskCNN(nn.Module):
     def __init__(self):
         super().__init__()
@@ -53,69 +60,127 @@ class MultiTaskCNN(nn.Module):
             nn.Conv2d(16, 32, 3, padding=1), nn.ReLU(), nn.MaxPool2d(2),
             nn.Conv2d(32, 64, 3, padding=1), nn.ReLU(), nn.MaxPool2d(2), # Output: 64x8x8
             nn.Flatten(),
-            nn.Linear(64*8*8, 512), nn.ReLU()
+            nn.Linear(64*8*8, 512), nn.ReLU(),
+            nn.Dropout(0.5) 
         )
         # Cabeça para classificação (OK/FAIL)
         self.classifier = nn.Sequential(nn.Linear(512, 1), nn.Sigmoid())
-        # Cabeça para regressão da rotação (prevê um valor, ex: ângulo)
-        self.regressor_rot = nn.Linear(512, 1)
-        # Cabeça para regressão do deslocamento (prevê dx, dy)
-        self.regressor_disp = nn.Linear(512, 2)
 
     def forward(self, x):
         features = self.backbone(x)
         prob = self.classifier(features).squeeze()
-        rot = self.regressor_rot(features).squeeze()
-        disp = self.regressor_disp(features).squeeze()
-        return prob, rot, disp
+        return prob
 
 # --- Lógica de Treinamento ---
 if __name__ == '__main__':
-    conn = get_db_connection()
-    cursor = conn.cursor(dictionary=True)
-    cursor.execute("SELECT produced_base64, label FROM training_samples")
-    samples = cursor.fetchall()
-    cursor.close()
-    conn.close()
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor(dictionary=True)
+        
+        # --- SUGESTÃO 3: Busca 'produced_path' em vez de 'produced_base64' ---
+        cursor.execute("""
+            SELECT produced_path, label FROM training_samples
+            WHERE created_at > (NOW() - INTERVAL 30 DAY) 
+              AND produced_path IS NOT NULL
+            ORDER BY id DESC
+            LIMIT 5000 
+        """)
+        samples = cursor.fetchall()
+        cursor.close()
+        conn.close()
+    except mysql.connector.Error as err:
+        print(f"Erro de DB ao buscar amostras: {err}")
+        samples = []
 
-    if len(samples) < 10: # Aumenta o mínimo para um treinamento mais significativo
-        print(f"Amostras insuficientes ({len(samples)}). Pelo menos 10 são necessárias. Pulando treinamento.")
+    if len(samples) < 20: 
+        print(f"Amostras insuficientes ({len(samples)}). Pelo menos 20 são necessárias. Pulando treinamento.")
     else:
         print(f"Encontradas {len(samples)} amostras. Iniciando treinamento...")
         
-        train_data, val_data = train_test_split(samples, test_size=0.2, random_state=42)
-        train_loader = DataLoader(InspectionDataset(train_data), batch_size=16, shuffle=True)
-        val_loader = DataLoader(InspectionDataset(val_data), batch_size=16)
+        # Filtra amostras onde o caminho é inválido
+        valid_samples = [s for s in samples if s['produced_path'] and os.path.exists(s['produced_path'])]
+        invalid_count = len(samples) - len(valid_samples)
+        if invalid_count > 0:
+            print(f"Aviso: {invalid_count} amostras foram puladas por terem caminhos de imagem inválidos.")
 
-        model = MultiTaskCNN()
-        # Funções de perda para cada tarefa
-        criterion_class = nn.BCELoss() # Para OK/FAIL
-        criterion_reg = nn.MSELoss()   # Para rotação/deslocamento
-        
-        optimizer = optim.Adam(model.parameters(), lr=0.001)
+        if len(valid_samples) < 20:
+             print(f"Amostras válidas insuficientes ({len(valid_samples)}). Pulando treinamento.")
+        else:
+            try:
+                train_data, val_data = train_test_split(valid_samples, test_size=0.2, random_state=42, stratify=[s['label'] for s in valid_samples])
+            except ValueError:
+                 print("Não foi possível dividir os dados para validação (provavelmente poucas amostras de uma classe). Usando todas para treinar.")
+                 train_data, val_data = valid_samples, [] # Treina com tudo
 
-        for epoch in range(10): # Mais épocas para um modelo mais complexo
-            model.train()
-            total_loss = 0
-            for imgs, labels in train_loader:
-                pred_class, pred_rot, pred_disp = model(imgs)
-                
-                # Calcula a perda para cada tarefa
-                loss_class = criterion_class(pred_class, labels['class'])
-                
-                # NOTA: O treinamento de regressão só funcionará quando você tiver
-                # dados reais de rotação/deslocamento. Por enquanto, a perda será 0.
-                loss_rot = criterion_reg(pred_rot, labels['rot'])
-                loss_disp = criterion_reg(pred_disp, labels['disp'])
-                
-                # Combina as perdas (pode-se adicionar pesos aqui, ex: 1.0 * loss_class)
-                loss = loss_class + loss_rot + loss_disp
-                
-                optimizer.zero_grad()
-                loss.backward()
-                optimizer.step()
-                total_loss += loss.item()
-            print(f"Epoch {epoch+1} - Loss: {total_loss/len(train_loader):.4f}")
+            train_loader = DataLoader(InspectionDataset(train_data), batch_size=16, shuffle=True)
+            
+            model = MultiTaskCNN()
+            
+            # Carrega o modelo existente para continuar o treinamento, se existir
+            model_path = 'trained_model.pt'
+            if os.path.exists(model_path):
+                try:
+                    model.load_state_dict(torch.load(model_path))
+                    print("Carregando modelo existente para continuar o treinamento.")
+                except Exception as e:
+                    print(f"Não foi possível carregar modelo existente ({e}). Iniciando do zero.")
 
-        torch.save(model.state_dict(), 'trained_model.pt')
-        print("✅ Modelo salvo em trained_model.pt")
+            criterion_class = nn.BCELoss()
+            optimizer = optim.Adam(model.parameters(), lr=0.0005) # Taxa de aprendizado menor para fine-tuning
+
+            best_val_loss = float('inf')
+            epochs_no_improve = 0
+            
+            for epoch in range(20): 
+                model.train()
+                total_loss = 0
+                for imgs, labels in train_loader:
+                    if imgs.nelement() == 0: continue # Pula batchs vazios
+                    pred_class = model(imgs)
+                    loss = criterion_class(pred_class, labels)
+                    optimizer.zero_grad()
+                    loss.backward()
+                    optimizer.step()
+                    total_loss += loss.item()
+                
+                avg_train_loss = total_loss / len(train_loader) if len(train_loader) > 0 else 0
+
+                # --- Etapa de Validação (se houver dados de validação) ---
+                if val_data:
+                    model.eval()
+                    total_val_loss = 0
+                    correct_val = 0
+                    val_loader = DataLoader(InspectionDataset(val_data), batch_size=16)
+                    
+                    with torch.no_grad():
+                        for imgs, labels in val_loader:
+                            if imgs.nelement() == 0: continue
+                            pred_class = model(imgs)
+                            total_val_loss += criterion_class(pred_class, labels).item()
+                            predicted = (pred_class > 0.5).float()
+                            correct_val += (predicted == labels).sum().item()
+                    
+                    avg_val_loss = total_val_loss / len(val_loader)
+                    val_accuracy = (correct_val / len(val_data)) * 100
+                    
+                    print(f"Epoch {epoch+1} - Train Loss: {avg_train_loss:.4f}, Val Loss: {avg_val_loss:.4f}, Val Acc: {val_accuracy:.2f}%")
+
+                    if avg_val_loss < best_val_loss:
+                        best_val_loss = avg_val_loss
+                        torch.save(model.state_dict(), model_path)
+                        print(f"✅ Novo melhor modelo salvo em {model_path} (Val Loss: {best_val_loss:.4f})")
+                        epochs_no_improve = 0
+                    else:
+                        epochs_no_improve += 1
+                        if epochs_no_improve >= 5:
+                            print("Parada antecipada (Early Stopping).")
+                            break
+                else:
+                    # Se não houver dados de validação, apenas salva o modelo final
+                    print(f"Epoch {epoch+1} - Train Loss: {avg_train_loss:.4f} (Sem dados de validação)")
+                    torch.save(model.state_dict(), model_path)
+
+            if not val_data:
+                print(f"✅ Modelo salvo em {model_path} (treinamento sem validação concluído).")
+            
+            print("Treinamento concluído.")
