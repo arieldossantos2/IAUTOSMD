@@ -4,3 +4,12 @@ opencv-python
 numpy
 mysql-connector-python
 scikit-image
+
+
+python -m venv venv
+# Windows
+venv\Scripts\activate
+# Linux/Mac
+source .venv/bin/activate
+
+pip install flask flask-login opencv-python numpy torch scikit-image

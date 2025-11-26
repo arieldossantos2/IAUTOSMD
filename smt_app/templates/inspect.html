@@ -99,7 +99,7 @@ document.getElementById('inspectForm').addEventListener('submit', async function
 
         document.getElementById('totalOk').textContent = result.total_ok;
         document.getElementById('totalFail').textContent = result.total_fail;
-        document.getElementById('resultImage').src = `/static/uploads/${result.result_filename}?t=${Date.now()}`;
+        document.getElementById('resultImage').src = `${result.result_image_url}?t=${Date.now()}`;
         componentsGrid.innerHTML = '';
         
         result.detailed_components.forEach(comp => {

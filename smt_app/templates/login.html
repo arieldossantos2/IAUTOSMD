@@ -12,7 +12,7 @@
             >
           </div>
         <h1 class="text-3xl font-bold text-center mb-6">Login</h1>
-        <form action="{{ url_for('login') }}" method="POST">
+        <form action="{{ url_for('auth.login') }}" method="POST">
             {% if error %}
             <div class="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded-lg mb-4" role="alert">
                 <p>{{ error }}</p>
@@ -29,7 +29,7 @@
             <button type="submit" class="btn-primary w-full">Entrar</button>
         </form>
         <p class="text-center mt-4 text-sm text-gray-600">
-            Não tem uma conta? <a href="{{ url_for('register') }}" class="text-indigo-600 font-medium hover:underline">Cadastre-se</a>
+            Não tem uma conta? <a href="{{ url_for('auth.register') }}" class="text-indigo-600 font-medium hover:underline">Cadastre-se</a>
         </p>
     </div>
 </div>

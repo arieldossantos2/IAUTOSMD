@@ -1,4 +1,3 @@
-# smt_app/vision.py
 import cv2
 import numpy as np
 import torch
@@ -6,9 +5,10 @@ from skimage.metrics import structural_similarity as ssim
 from flask import current_app
 from .db_helpers import cv2_to_base64 # Import local
 import sys
-import os # <--- CORREÇÃO
+import os
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from train_model import path_to_tensor
+import math
 
 def find_fiducial_rings(image):
     if image is None: return []
@@ -41,73 +41,187 @@ def align_with_fiducials(golden_img, produced_img, fiducials):
         return cv2.resize(produced_img, (w, h))
     for f in fiducials:
         expected_center = (f['x'], f['y'])
-        closest_ring = min(produced_rings, key=lambda ring: np.hypot(ring['x'] - expected_center[0], ring['y'] - expected_center[1]))
+        closest_ring = min(
+            produced_rings,
+            key=lambda ring: np.hypot(
+                ring['x'] - expected_center[0],
+                ring['y'] - expected_center[1]
+            )
+        )
         golden_points.append([f['x'], f['y']])
         produced_points.append([closest_ring['x'], closest_ring['y']])
     M = None
     if len(golden_points) >= 3:
-        M, _ = cv2.findHomography(np.float32(produced_points), np.float32(golden_points), cv2.RANSAC, 5.0)
+        M, _ = cv2.findHomography(
+            np.float32(produced_points),
+            np.float32(golden_points),
+            cv2.RANSAC, 5.0
+        )
     if M is not None:
         return cv2.warpPerspective(produced_img, M, (w, h))
     if len(golden_points) >= 2:
-        M_affine = cv2.getAffineTransform(np.float32(produced_points[:2]), np.float32(golden_points[:2]))
+        M_affine = cv2.getAffineTransform(
+            np.float32(produced_points[:2]),
+            np.float32(golden_points[:2])
+        )
         return cv2.warpAffine(produced_img, M_affine, (w, h))
     return cv2.resize(produced_img, (w, h))
 
-def analyze_component_package_based(golden_roi, template_img, template_mask_path, roi_p_original, expected_rotation=0, 
-                                    presence_threshold=0.35, ssim_threshold=0.6, color_threshold=0.7):
+def _rotate_template_and_mask_for_inspection(template_img, template_mask, rotation):
+    """Gira a imagem do template e sua máscara pelo ângulo (0, 90, 180 ou 270 graus)."""
+    rotation = int(rotation) % 360
+
+    if rotation == 90:
+        template_img = cv2.rotate(template_img, cv2.ROTATE_90_CLOCKWISE)
+        template_mask = cv2.rotate(template_mask, cv2.ROTATE_90_CLOCKWISE)
+    elif rotation == 180:
+        template_img = cv2.rotate(template_img, cv2.ROTATE_180)
+        template_mask = cv2.rotate(template_mask, cv2.ROTATE_180)
+    elif rotation == 270:
+        template_img = cv2.rotate(template_img, cv2.ROTATE_90_COUNTERCLOCKWISE)
+        template_mask = cv2.rotate(template_mask, cv2.ROTATE_90_COUNTERCLOCKWISE)
+    return template_img, template_mask
+
+
+def analyze_component_package_based(
+    golden_roi,
+    template_img,
+    template_mask_path,
+    roi_p_original,
+    expected_rotation=0,
+    presence_threshold=0.35,
+    ssim_threshold=0.6,
+    color_threshold=0.7,
+):
+    """
+    Template do pacote está em 0° (definido no cadastro).
+    Aqui giramos template+máscara pela rotação do componente (expected_rotation)
+    e fazemos matchTemplate mascarado dentro da ROI de produção.
+    """
     PRESENCE_THRESHOLD = presence_threshold
-    SSIM_THRESHOLD = ssim_threshold
-    COLOR_THRESHOLD = color_threshold
-    ROTATION_TOLERANCE_THRESHOLD = 0.7 
+
+    def safe_float(x, default=0.0):
+        try:
+            x = float(x)
+            if math.isfinite(x):
+                return x
+            return default
+        except Exception:
+            return default
+
     try:
-        # Caminho da máscara agora é absoluto
         template_mask_abs_path = os.path.join(current_app.static_folder, template_mask_path)
         template_mask = cv2.imread(template_mask_abs_path, cv2.IMREAD_GRAYSCALE)
-        
+
         if template_img is None or template_mask is None or roi_p_original is None:
-            return {'status': 'FAIL', 'details': {'message': f'Template, Máscara ({template_mask_abs_path}) ou ROI Produção não encontrado.'}}
-        
-        padding = max(template_img.shape[0], template_img.shape[1])
-        roi_p = cv2.copyMakeBorder(roi_p_original, padding, padding, padding, padding, cv2.BORDER_CONSTANT, value=[0, 0, 0])
-        template_gray = cv2.cvtColor(template_img, cv2.COLOR_BGR2GRAY)
-        roi_p_gray = cv2.cvtColor(roi_p, cv2.COLOR_BGR2GRAY)
-        best_match = {'angle': -1, 'score': np.inf, 'loc': (0, 0), 'dims': (0,0)}
-        rotations = [0, 90, 180, 270]
-        
-        for angle in rotations:
-            M_template = cv2.getRotationMatrix2D((template_gray.shape[1] / 2, template_gray.shape[0] / 2), angle, 1)
-            rotated_template = cv2.warpAffine(template_gray, M_template, (template_gray.shape[1], template_gray.shape[0]))
-            M_mask = cv2.getRotationMatrix2D((template_mask.shape[1] / 2, template_mask.shape[0] / 2), angle, 1)
-            rotated_mask = cv2.warpAffine(template_mask, M_mask, (template_mask.shape[1], template_mask.shape[0]))
-            if angle % 180 != 0:
-                rotated_template = cv2.warpAffine(template_gray, M_template, (template_gray.shape[0], template_gray.shape[1]))
-                rotated_mask = cv2.warpAffine(template_mask, M_mask, (template_mask.shape[0], template_mask.shape[1]))
-            h_rot, w_rot = rotated_template.shape[:2]
-            if h_rot > roi_p_gray.shape[0] or w_rot > roi_p_gray.shape[1]: continue 
-            res = cv2.matchTemplate(roi_p_gray, rotated_template, cv2.TM_SQDIFF_NORMED, mask=rotated_mask)
-            min_val, _, min_loc, _ = cv2.minMaxLoc(res)
-            if min_val < best_match['score']:
-                best_match = {'angle': angle, 'score': min_val, 'loc': min_loc, 'dims': (h_rot, w_rot)}
-        
-        correlation_score = 1.0 - best_match['score']
-        
+            return {
+                'status': 'FAIL',
+                'found_rotation': f'{int(expected_rotation) % 360}°',
+                'displacement': {'x': 0, 'y': 0},
+                'details': {
+                    'message': f'Template, máscara ({template_mask_abs_path}) ou ROI Produção não encontrado.',
+                    'correlation_score': 0.0,
+                    'ssim': None,
+                    'color_similar': None,
+                    'color_score': None,
+                }
+            }
+
+        # gira template+mask pela rotação do componente
+        template_img_rot, template_mask_rot = _rotate_template_and_mask_for_inspection(
+            template_img.copy(), template_mask.copy(), expected_rotation
+        )
+
+        roi_gray = cv2.cvtColor(roi_p_original, cv2.COLOR_BGR2GRAY)
+        template_gray = cv2.cvtColor(template_img_rot, cv2.COLOR_BGR2GRAY)
+
+        h_t, w_t = template_gray.shape[:2]
+        h_r, w_r = roi_gray.shape[:2]
+
+        if h_t > h_r or w_t > w_r:
+            return {
+                'status': 'FAIL',
+                'found_rotation': f'{int(expected_rotation) % 360}°',
+                'displacement': {'x': 0, 'y': 0},
+                'details': {
+                    'message': (
+                        f'Template maior que ROI na inspeção '
+                        f'(ROI: {roi_gray.shape}, Template: {template_gray.shape})'
+                    ),
+                    'correlation_score': 0.0,
+                    'ssim': None,
+                    'color_similar': None,
+                    'color_score': None,
+                }
+            }
+
+        res = cv2.matchTemplate(
+            roi_gray,
+            template_gray,
+            cv2.TM_SQDIFF_NORMED,
+            mask=template_mask_rot
+        )
+        min_val, max_val, min_loc, max_loc = cv2.minMaxLoc(res)
+
+        if not math.isfinite(min_val):
+            min_val = 1.0
+
+        correlation_score = safe_float(1.0 - min_val, 0.0)
+        correlation_score = max(0.0, min(1.0, correlation_score))
+
         if correlation_score < PRESENCE_THRESHOLD:
-            return {'status': 'FAIL', 'found_rotation': 'N/A', 'displacement': {'x': 0, 'y': 0}, 'details': {'message': f'Componente Ausente (Score: {correlation_score:.2f} < {PRESENCE_THRESHOLD})', 'correlation_score': float(correlation_score)}}
-        
-        # ... (Restante da lógica de SSIM, Rotação e Cor inalterada) ...
-        
+            return {
+                'status': 'FAIL',
+                'found_rotation': f'{int(expected_rotation) % 360}°',
+                'displacement': {'x': 0, 'y': 0},
+                'details': {
+                    'message': f'Componente Ausente (Score: {correlation_score:.2f} < {PRESENCE_THRESHOLD})',
+                    'correlation_score': correlation_score,
+                    'ssim': None,
+                    'color_similar': None,
+                    'color_score': None,
+                },
+                'debug_data': {
+                    'min_val': safe_float(min_val, 1.0),
+                    'template_shape': (h_t, w_t),
+                    'roi_shape': (h_r, w_r),
+                }
+            }
+
         return {
-            'status': "OK", # Substitua pelo status real
-            'found_rotation': f"{best_match['angle']}°",
-            'displacement': {'x': 0, 'y': 0}, # Substitua
-            'details': {'message': "OK", 'correlation_score': float(correlation_score)},
-            'debug_data': {}
+            'status': 'OK',
+            'found_rotation': f'{int(expected_rotation) % 360}°',
+            'displacement': {'x': 0, 'y': 0},
+            'details': {
+                'message': 'OK',
+                'correlation_score': correlation_score,
+                'ssim': None,
+                'color_similar': None,
+                'color_score': None,
+            },
+            'debug_data': {
+                'min_val': safe_float(min_val, 1.0),
+                'template_shape': (h_t, w_t),
+                'roi_shape': (h_r, w_r),
+            }
         }
+
     except Exception as e:
         import traceback
         traceback.print_exc()
-        return {'status': 'FAIL', 'details': {'message': f'Erro na análise: {str(e)}'}}
+        return {
+            'status': 'FAIL',
+            'found_rotation': f'{int(expected_rotation) % 360}°',
+            'displacement': {'x': 0, 'y': 0},
+            'details': {
+                'message': f'Erro na análise: {str(e)}',
+                'correlation_score': 0.0,
+                'ssim': None,
+                'color_similar': None,
+                'color_score': None,
+            }
+        }
+
 
 def predict_with_model(roi_p):
     model = current_app.config['MODEL']
@@ -117,10 +231,10 @@ def predict_with_model(roi_p):
     try:
         tensor = path_to_tensor(roi_p, is_path=False).unsqueeze(0).to(device)
         with torch.no_grad():
-            prob = model(tensor) 
+            prob = model(tensor)
             prob = prob.item()
         status = 'OK' if prob > 0.5 else 'FAIL'
-        details = {'prob': prob} 
+        details = {'prob': prob}
         return status, details
     except Exception as e:
         print(f"Erro durante a inferência do modelo: {e}")

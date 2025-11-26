@@ -1,0 +1,260 @@
+{% extends "base.html" %}
+{% block title %}Inspecionar Placa{% endblock %}
+
+{% block content %}
+<div class="max-w-6xl mx-auto p-6 bg-white rounded-xl shadow-lg">
+    <h1 class="text-3xl font-bold mb-6 text-center">Inspecionar Placa</h1>
+    
+    <form id="inspectForm" class="space-y-6" enctype="multipart/form-data">
+        <div>
+            <label for="product_id" class="block text-sm font-medium text-gray-700">Selecione o Produto:</label>
+            <select id="product_id" name="product_id" required
+                class="mt-1 block w-full pl-3 pr-10 py-2 text-base border-gray-300 focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 rounded-md">
+                <option value="" disabled selected>Escolha um produto</option>
+                {% for product in products %}
+                    <option value="{{ product.id }}">{{ product.name }}</option>
+                {% endfor %}
+            </select>
+        </div>
+        <div>
+            <label for="produced" class="block text-sm font-medium text-gray-700">
+                Selecione a Imagem da Placa a ser Inspecionada:
+            </label>
+            <div class="mt-1 flex justify-center px-6 pt-5 pb-6 border-2 border-gray-300 border-dashed rounded-md">
+                <div class="space-y-1 text-center">
+                    <svg class="mx-auto h-12 w-12 text-gray-400" stroke="currentColor" fill="none" viewBox="0 0 48 48" aria-hidden="true"><path d="M28 8H12a4 4 0 00-4 4v20m32-12v8m0 0v8a4 4 0 01-4 4H12a4 4 0 01-4-4v-4m32-4l-3.172-3.172a4 4 0 00-5.656 0L28 28M8 32l9.172-9.172a4 4 0 015.656 0L28 28m0 0l4 4m4-24h8m-4-4v8m-12 4h.02" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" /></svg>
+                    <div class="flex text-sm text-gray-600">
+                        <label for="produced" class="relative cursor-pointer bg-white rounded-md font-medium text-indigo-600 hover:text-indigo-500">
+                            <span>Carregar um arquivo</span>
+                            <input id="produced" name="produced" type="file" class="sr-only" required accept="image/*">
+                        </label>
+                        <p class="pl-1">ou arrastar e soltar</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+        <button type="submit" class="w-full bg-indigo-600 text-white py-3 rounded-lg hover:bg-indigo-700 flex justify-center items-center gap-2" id="inspectButton">
+            <span id="buttonText">Executar Inspeção</span>
+            <span id="spinner" class="hidden h-5 w-5 border-2 border-white border-t-transparent rounded-full animate-spin"></span>
+        </button>
+    </form>
+    
+    <div id="loadingMessage" class="hidden mt-6 text-center text-gray-600">
+        <p>Inspecionando a placa... Isso pode levar alguns segundos.</p>
+    </div>
+    
+    <div id="resultContainer" class="mt-8 hidden">
+        <h2 class="text-2xl font-bold mb-4">Resultado da Inspeção</h2>
+        
+        <div class="flex justify-around items-center text-center font-bold text-xl mb-4">
+            <div class="text-green-600"><span id="totalOk">0</span> Componentes OK</div>
+            <div class="text-red-600"><span id="totalFail">0</span> Componentes COM FALHA</div>
+        </div>
+        
+        <div class="mb-6">
+            <h3 class="text-xl font-semibold mb-2">Imagem do Resultado:</h3>
+            <img id="resultImage" src="" alt="Imagem do resultado da inspeção" class="rounded-lg shadow-md max-w-full h-auto">
+        </div>
+
+        <div id="visualInspectionContainer" class="mt-8">
+            <h3 class="text-xl font-semibold mb-4">Análise Detalhada dos Componentes</h3>
+            <div id="componentsGrid" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+                </div>
+        </div>
+
+        <div class="text-center mt-10">
+            <button type="button" id="sendFinalFeedback" class="bg-blue-600 hover:bg-blue-700 text-white font-semibold px-8 py-3 rounded-xl">
+                🚀 Enviar Julgamento e Retreinar
+            </button>
+        </div>
+    </div>
+</div>
+
+<script>
+document.getElementById('inspectForm').addEventListener('submit', async function(event) {
+    event.preventDefault();
+
+    const form = event.target;
+    const formData = new FormData(form);
+    const button = document.getElementById('inspectButton');
+    const spinner = document.getElementById('spinner');
+    const loadingMessage = document.getElementById('loadingMessage');
+    const resultContainer = document.getElementById('resultContainer');
+    const componentsGrid = document.getElementById('componentsGrid');
+
+    resultContainer.classList.add('hidden');
+    button.disabled = true;
+    spinner.classList.remove('hidden');
+    loadingMessage.classList.remove('hidden');
+
+    try {
+        const response = await fetch('/inspect', { method: 'POST', body: formData });
+
+        if (!response.ok) {
+            const errorResult = await response.json();
+            throw new Error(errorResult.error || `Erro do servidor: ${response.status}`);
+        }
+
+        const result = await response.json();
+
+        document.getElementById('totalOk').textContent = result.total_ok;
+        document.getElementById('totalFail').textContent = result.total_fail;
+        document.getElementById('resultImage').src = `/static/uploads/${result.result_filename}?t=${Date.now()}`;
+        componentsGrid.innerHTML = '';
+        
+        result.detailed_components.forEach(comp => {
+            const finalStatusColor = comp.final_status === 'OK' ? 'text-green-600' : 'text-red-600';
+            const cvStatusColor = comp.cv_status === 'OK' ? 'text-green-500' : (comp.cv_status === 'UNKNOWN' ? 'text-gray-500' : 'text-red-500');
+            const aiStatusColor = comp.ai_status === 'OK' ? 'text-green-500' : (comp.ai_status === 'UNKNOWN' ? 'text-gray-500' : 'text-red-500');
+
+            const ssim = comp.cv_details.ssim ? comp.cv_details.ssim.toFixed(2) : 'N/A';
+            const corr = comp.cv_details.correlation_score ? comp.cv_details.correlation_score.toFixed(2) : 'N/A';
+            const prob = comp.ai_details.prob ? comp.ai_details.prob.toFixed(2) : 'N/A';
+            // ATUALIZADO (Sugestão 5): Adiciona métrica de cor
+            const color = comp.cv_details.color_similarity ? comp.cv_details.color_similarity.toFixed(2) : 'N/A';
+            
+            const detailsHtml = `
+                <p><strong>Status Final: <span class="${finalStatusColor} font-bold">${comp.final_status}</span></strong></p>
+                <p>Análise CV: <span class="${cvStatusColor}">${comp.cv_status}</span> (SSIM: ${ssim}, Corr: ${corr})</p>
+                <p>Análise Cor: <span class="text-gray-600">${color}</span></p> 
+                <p class_="${aiStatusColor}">Análise IA: <span class="${aiStatusColor}">${comp.ai_status}</span> (Prob: ${prob})</p>
+                <p class="text-xs text-gray-500">CV Msg: ${comp.cv_details.message}</p>
+                <p>Rotação: ${comp.found_rotation} | Desloc. (x,y): (${comp.displacement.x}, ${comp.displacement.y})</p>
+            `;
+
+            let debugImagesHtml = '';
+            let gridColsClass = 'grid-cols-2'; // Padrão: Golden e Inspecionado
+
+            if (comp.debug_data && comp.debug_data.debug_img_b64) {
+                gridColsClass = 'md:grid-cols-2 lg:grid-cols-3'; 
+                
+                debugImagesHtml += `
+                    <div class="text-center">
+                        <span class="block text-sm font-semibold mb-1">Debug (Match)</span>
+                        <img src="/static/debug/${comp.debug_filename}?t=${Date.now()}" 
+                             alt="Depuração da Análise CV" 
+                             class="w-24 h-24 object-contain rounded-md border-2 border-yellow-400 bg-black mx-auto">
+                        <p class="text-xs text-gray-500">Verde: Corpo encontrado</p>
+                    </div>
+                `;
+                
+                debugImagesHtml += `
+                    <div class="text-center">
+                        <span class="block text-sm font-semibold mb-1">Golden (Corpo)</span>
+                        <img src="data:image/png;base64,${comp.debug_data.target_ssim_b64}" alt="Golden Body" class="w-24 h-24 object-contain rounded-md border-2 border-blue-400 bg-black mx-auto">
+                    </div>
+                    <div class="text-center">
+                        <span class="block text-sm font-semibold mb-1">Encontrado (Corpo)</span>
+                        <img src="data:image/png;base64,${comp.debug_data.found_comp_b64}" alt="Found Body" class="w-24 h-24 object-contain rounded-md border-2 border-blue-400 bg-black mx-auto">
+                    </div>
+                `;
+            }
+
+
+            const cardHtml = `
+                <div class="bg-gray-50 p-4 rounded-lg shadow-sm border">
+                    <h4 class="font-bold text-lg mb-2">${comp.name} (${comp.package})</h4>
+                    <div class="text-xs text-gray-600 space-y-1 bg-gray-100 p-2 rounded mb-4">
+                        ${detailsHtml}
+                    </div>
+                    
+                    <div class="grid ${gridColsClass} gap-2 items-start justify-center">
+                        <div class="text-center">
+                            <span class="block text-sm font-semibold mb-1">Golden (ROI)</span>
+                            <img src="data:image/png;base64,${comp.golden_image}" alt="Golden" class="w-24 h-24 object-contain rounded-md border-2 bg-black mx-auto">
+                        </div>
+                        <div class="text-center">
+                            <span class="block text-sm font-semibold mb-1">Inspecionado (ROI)</span>
+                            <img src="data:image/png;base64,${comp.produced_image}" alt="Inspecionado" class="w-24 h-24 object-contain rounded-md border-2 bg-black mx-auto">
+                        </div>
+                        
+                        ${debugImagesHtml}
+                    </div>
+
+                    <div class="mt-4 text-center">
+                        <p class="text-sm text-gray-600 mb-2">Confirmação manual:</p>
+                        <button type="button" class="feedback-btn bg-green-500 hover:bg-green-600 text-white px-3 py-1 rounded-md text-sm" data-component="${comp.name}" data-feedback="GOOD">✅ GOOD</button>
+                        <button type="button" class="feedback-btn bg-red-500 hover:bg-red-500 text-white px-3 py-1 rounded-md text-sm" data-component="${comp.name}" data-feedback="FAIL">❌ FAIL</button>
+                        <span id="feedback-status-${comp.name}" class="ml-2 text-sm text-gray-500 hidden">✔️ Salvo</span>
+                    </div>
+                </div>`;
+            componentsGrid.innerHTML += cardHtml;
+        });
+
+        resultContainer.classList.remove('hidden');
+        configurarFeedbackBotoes();
+
+    } catch (error) {
+        alert('Erro ao inspecionar a placa: ' + error.message);
+        console.error(error);
+    } finally {
+        button.disabled = false;
+        spinner.classList.add('hidden');
+        loadingMessage.classList.add('hidden');
+    }
+});
+
+// Lógica de Feedback (inalterada)
+function configurarFeedbackBotoes() {
+    // (Função sem alterações)
+    const feedbackSelections = {};
+
+    document.querySelectorAll(".feedback-btn").forEach(button => {
+        button.addEventListener("click", () => {
+            const comp = button.dataset.component;
+            const feedback = button.dataset.feedback;
+
+            const parent = button.closest("div.mt-4.text-center");
+            parent.querySelectorAll(".feedback-btn").forEach(b => b.classList.remove("ring-4", "ring-yellow-400"));
+
+            button.classList.add("ring-4", "ring-yellow-400");
+            feedbackSelections[comp] = feedback;
+        });
+    });
+
+    const finalBtn = document.getElementById("sendFinalFeedback");
+    finalBtn.onclick = async () => { 
+        if (Object.keys(feedbackSelections).length === 0) {
+            alert("Selecione pelo menos um feedback antes de enviar.");
+            return;
+        }
+
+        const product_id = document.getElementById("product_id").value;
+        const payload = {
+            product_id,
+            feedbacks: feedbackSelections
+        };
+
+        finalBtn.disabled = true;
+        finalBtn.textContent = "Salvando...";
+
+        try {
+            const response = await fetch("/feedback", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(payload),
+            });
+
+            if (response.ok) {
+                const result = await response.json();
+                if (result.success) {
+                    Object.keys(feedbackSelections).forEach(comp => {
+                        document.getElementById(`feedback-status-${comp}`).classList.remove("hidden");
+                    });
+                    alert("✅ Julgamento salvo! O retreinamento da IA foi iniciado em segundo plano.");
+                } else {
+                    alert("Erro ao salvar julgamento: " + result.error);
+                }
+            } else {
+                alert("Erro de comunicação com o servidor.");
+            }
+        } catch (err) {
+            alert("Erro fatal ao enviar feedback: " + err);
+        } finally {
+            finalBtn.disabled = false;
+            finalBtn.textContent = "🚀 Enviar Julgamento e Retreinar";
+        }
+    };
+}
+</script>
+{% endblock %}

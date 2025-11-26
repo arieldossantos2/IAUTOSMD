@@ -1,4 +1,3 @@
-# smt_app/models.py
 from flask_login import UserMixin
 import torch
 import torch.nn as nn
