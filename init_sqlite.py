@@ -35,6 +35,8 @@ CREATE TABLE packages (
   name TEXT NOT NULL,
   body_matrix TEXT DEFAULT NULL,
   body_mask TEXT DEFAULT NULL,
+  template_roi_width INTEGER DEFAULT NULL,
+  template_roi_height INTEGER DEFAULT NULL,
   presence_threshold REAL DEFAULT 0.35,
   ssim_threshold REAL DEFAULT 0.6,
   UNIQUE (name)

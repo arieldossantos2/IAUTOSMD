@@ -87,24 +87,31 @@ def add_product():
                 # Busca/cria pacote
                 if package_name not in package_info:
                     cursor.execute(
-                        "SELECT id, body_matrix, body_mask FROM packages WHERE name = ?",
+                        "SELECT id, body_matrix, body_mask, template_roi_width, template_roi_height "
+                        "FROM packages WHERE name = ?",
                         (package_name,)
                     )
                     pkg_data = cursor.fetchone()
                     if not pkg_data:
                         cursor.execute(
-                            "INSERT INTO packages (name, presence_threshold, ssim_threshold) VALUES (?, ?, ?)",
+                            "INSERT INTO packages (name, presence_threshold, ssim_threshold) "
+                            "VALUES (?, ?, ?)",
                             (package_name, 0.35, 0.6)
                         )
                         package_id = cursor.lastrowid
-                        package_info[package_name] = {'id': package_id, 'has_matrix': False}
-                    else:
-                        # sqlite3.Row => acesso por índice ou nome
                         package_info[package_name] = {
-                            'id': pkg_data['id'] if isinstance(pkg_data, sqlite3.Row) else pkg_data[0],
-                            'has_matrix': bool(
-                                pkg_data['body_matrix'] if isinstance(pkg_data, sqlite3.Row) else pkg_data[1]
-                            )
+                            'id': package_id,
+                            'has_matrix': False,
+                            'template_roi_width': None,
+                            'template_roi_height': None
+                        }
+                    else:
+                        # sqlite3.Row => acesso por nome
+                        package_info[package_name] = {
+                            'id': pkg_data['id'],
+                            'has_matrix': bool(pkg_data['body_matrix']),
+                            'template_roi_width': pkg_data['template_roi_width'],
+                            'template_roi_height': pkg_data['template_roi_height']
                         }
 
                 package_id = package_info[package_name]['id']
@@ -232,11 +239,16 @@ def add_product():
                             'error': f"Falha ao salvar arquivos de template/máscara para o pacote '{package_name}'."
                         }), 500
 
+                    # Atualiza pacote com template + máscara + tamanho da ROI usada na definição
                     cursor.execute(
-                        "UPDATE packages SET body_matrix = ?, body_mask = ? WHERE id = ?",
-                        (body_matrix_path, body_mask_path, package_id)
+                        """UPDATE packages
+                           SET body_matrix = ?, body_mask = ?, template_roi_width = ?, template_roi_height = ?
+                           WHERE id = ?""",
+                        (body_matrix_path, body_mask_path, w_roi, h_roi, package_id)
                     )
                     package_info[package_name]['has_matrix'] = True
+                    package_info[package_name]['template_roi_width'] = w_roi
+                    package_info[package_name]['template_roi_height'] = h_roi
 
                 # Salva o componente
                 cursor.execute(
@@ -267,11 +279,13 @@ def add_product():
             if conn:
                 conn.close()
 
-    # GET request: carrega pacotes para o select
+    # GET request: carrega pacotes para o select (inclui template_roi_* para o JS)
     conn = get_db_connection()
     cursor = conn.cursor()
     cursor.execute(
-        "SELECT id, name, presence_threshold, ssim_threshold, body_matrix FROM packages ORDER BY name"
+        "SELECT id, name, presence_threshold, ssim_threshold, body_matrix, "
+        "template_roi_width, template_roi_height "
+        "FROM packages ORDER BY name"
     )
     packages = cursor.fetchall()
     cursor.close()

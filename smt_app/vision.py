@@ -233,7 +233,7 @@ def predict_with_model(roi_p):
         with torch.no_grad():
             prob = model(tensor)
             prob = prob.item()
-        status = 'OK' if prob > 0.5 else 'FAIL'
+        status = 'OK' if prob >= 0.9 else 'FAIL'
         details = {'prob': prob}
         return status, details
     except Exception as e:

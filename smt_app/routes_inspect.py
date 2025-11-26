@@ -140,7 +140,7 @@ def inspect_board():
                 cv_status = cv_analysis.get('status', 'FAIL')
                 ai_status, ai_details = predict_with_model(roi_p)
 
-            final_status = "OK" if cv_status == "OK" and (ai_status == "OK" or ai_status == "UNKNOWN") else "FAIL"
+            final_status = "OK" if cv_status == "OK" or (ai_status == "OK") else "FAIL"
 
             if final_status == "OK":
                 total_ok += 1
