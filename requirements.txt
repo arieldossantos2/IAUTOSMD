@@ -1,3 +1,7 @@
+Não estou conseguindo subir o zip no AVEA
+Segue link do GitHub:
+https://github.com/arieldossantos2/IAUTOSMD
+
 Requirements: Python
 
 Na pasta do arquivo, no terminal:
