@@ -18,6 +18,10 @@ document.addEventListener('DOMContentLoaded', () => {
   const compPresenceInput = document.getElementById('compPresenceThreshold');
   const compSsimInput = document.getElementById('compSsimThreshold');
 
+  // Preview de template 0° do pacote (novo)
+  const packageTemplatePreviewContainer = document.getElementById('packageTemplatePreviewContainer');
+  const packageTemplatePreview = document.getElementById('packageTemplatePreview');
+
   // Fluxo de DEFINIÇÃO (bodyAdjustModal)
   const bodyAdjustModal = document.getElementById('bodyAdjustModal');
   const bodyDefinitionContainer = document.getElementById('bodyDefinitionContainer');
@@ -41,6 +45,41 @@ document.addEventListener('DOMContentLoaded', () => {
   const bodyConfirmLoading = document.getElementById('bodyConfirmLoading');
   const confirmBodyPositionBtn = document.getElementById('confirmBodyPositionBtn');
   const cancelBodyPositionBtn = document.getElementById('cancelBodyPositionBtn');
+
+  const compIsPolarizedCheckbox = document.getElementById('compIsPolarized');
+
+  // Polarity modal
+  const polarityDefinitionContainer = document.getElementById('polarityDefinitionContainer');
+  const definePolarityBtn = document.getElementById('definePolarityBtn');
+  const polarityDefinitionDone = document.getElementById('polarityDefinitionDone');
+
+  const polarityAdjustModal = document.getElementById('polarityAdjustModal');
+  const polarityAdjustLoading = document.getElementById('polarityAdjustLoading');
+  const polarityCanvasContainer = document.getElementById('polarityCanvasContainer');
+  const confirmPolarityBtn = document.getElementById('confirmPolarityBtn');
+  const cancelPolarityBtn = document.getElementById('cancelPolarityBtn');
+
+  // Estado da polaridade atual (em coordenadas dentro da ROI do componente)
+
+  let polarityCanvas = null;
+  let polarityCtx = null;
+  let polarityImg = null;
+  let currentPolarityRect = null; // {x,y,width,height} na ROI
+  let isDrawingPolarity = false;
+  let polStartX = 0, polStartY = 0;
+  let polScaleX = 1.0, polScaleY = 1.0;
+
+  // Quando marcar/desmarcar o checkbox, mostra/oculta a área de definição
+  compIsPolarizedCheckbox.addEventListener('change', () => {
+    if (compIsPolarizedCheckbox.checked) {
+      polarityDefinitionContainer.classList.remove('hidden');
+    } else {
+      polarityDefinitionContainer.classList.add('hidden');
+      polarityDefinitionDone.classList.add('hidden');
+      currentPolarityRect = null;
+    }
+  });
+
 
   // Estado
   let currentMode = null;
@@ -280,6 +319,24 @@ document.addEventListener('DOMContentLoaded', () => {
     bodyDefinitionContainer.classList.add('hidden');
     bodyConfirmationContainer.classList.add('hidden');
 
+    // Atualiza preview do template 0° do pacote, se existir
+    if (packageTemplatePreviewContainer && packageTemplatePreview) {
+      let previewShown = false;
+      if (selectedOption) {
+        const bodyMatrixPath = selectedOption.dataset.bodyMatrix;
+        if (bodyMatrixPath) {
+          // Caminho relativo ao /static
+          packageTemplatePreview.src = `/static/${bodyMatrixPath}`;
+          packageTemplatePreviewContainer.classList.remove('hidden');
+          previewShown = true;
+        }
+      }
+      if (!previewShown) {
+        packageTemplatePreview.src = '';
+        packageTemplatePreviewContainer.classList.add('hidden');
+      }
+    }
+
     if (compPackageSelect.value === '--new--') {
       newCompPackageContainer.classList.remove('hidden');
       compPresenceInput.value = 0.35;
@@ -326,6 +383,10 @@ document.addEventListener('DOMContentLoaded', () => {
         opt.dataset.bodyDefined = 'true';
         opt.dataset.templateRoiWidth = width;
         opt.dataset.templateRoiHeight = height;
+        // body_matrix virá do backend somente depois de salvo; aqui deixamos vazio
+        if (!opt.dataset.bodyMatrix) {
+          opt.dataset.bodyMatrix = '';
+        }
         break;
       }
     }
@@ -338,6 +399,7 @@ document.addEventListener('DOMContentLoaded', () => {
       newOption.dataset.ssim = '0.60';
       newOption.dataset.templateRoiWidth = width;
       newOption.dataset.templateRoiHeight = height;
+      newOption.dataset.bodyMatrix = '';
 
       const newOptionEntry = compPackageSelect.querySelector('option[value="--new--"]');
       compPackageSelect.insertBefore(newOption, newOptionEntry);
@@ -345,37 +407,69 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   function pushComponentAnnotation(packageName, isDefining) {
+    if (!currentComponentRect) {
+      alert('Nenhum componente selecionado.');
+      return;
+    }
+  
+    const nameInput = document.getElementById('compName');
+    const name = nameInput.value.trim() || `COMP${annotations.components.length + 1}`;
+  
     const rotationVal = parseInt(document.getElementById('compRotation').value) || 0;
-
+    const isPolarized = !!compIsPolarizedCheckbox.checked;
+  
+    if (isPolarized && !currentPolarityRect) {
+      alert('Você marcou o componente como polarizado, mas não definiu o BOX de polaridade.');
+      return;
+    }
+  
     const newComponent = {
-      name: document.getElementById('compName').value.trim() || `COMP${annotations.components.length + 1}`,
+      name,
       package: packageName,
       rotation: rotationVal,
       x: currentComponentRect.x,
       y: currentComponentRect.y,
       width: currentComponentRect.width,
-      height: currentComponentRect.height
+      height: currentComponentRect.height,
+      is_polarized: isPolarized,
+      polarity_rect: isPolarized && currentPolarityRect ? {
+        x: currentPolarityRect.x,
+        y: currentPolarityRect.y,
+        width: currentPolarityRect.width,
+        height: currentPolarityRect.height
+      } : null
     };
-
+  
     if (isDefining) {
       newComponent.final_body_rects = finalBodyRects;
       newComponent.component_roi_b64 = currentComponentROI_b64;
-
+  
       updatePackageDropdown(packageName, currentComponentRect.width, currentComponentRect.height);
-
-      // ARMAZENA TAMBÉM A ROTAÇÃO BASE DO TEMPLATE
+  
       newPackageTemplates[packageName] = {
         roi_b64: currentComponentROI_b64,
         body_rects: finalBodyRects,
         roi_width: currentComponentRect.width,
         roi_height: currentComponentRect.height,
-        base_rotation: rotationVal // <<< IMPORTANTE
+        base_rotation: rotationVal
       };
     }
-
+  
     annotations.components.push(newComponent);
     lastAnnotationType = { type: 'component' };
+  
+    // Reset do modal
+    nameInput.value = '';
+    document.getElementById('compRotation').value = '0';
+    compIsPolarizedCheckbox.checked = false;
+    currentPolarityRect = null;
+    polarityDefinitionContainer.classList.add('hidden');
+    polarityDefinitionDone.classList.add('hidden');
+  
+    componentModal.classList.add('hidden');
   }
+  
+  
 
   function showComponentModal(rect) {
     document.getElementById('compName').value = `COMP${annotations.components.length + 1}`;
@@ -389,17 +483,33 @@ document.addEventListener('DOMContentLoaded', () => {
     bodyConfirmationContainer.classList.add('hidden');
     bodyDefinitionDone.classList.add('hidden');
     bodyConfirmationDone.classList.add('hidden');
-
+  
+    // reset polaridade
+    compIsPolarizedCheckbox.checked = false;
+    currentPolarityRect = null;
+    polarityDefinitionContainer.classList.add('hidden');
+    polarityDefinitionDone.classList.add('hidden');
+  
+    // Esconde preview do template ao abrir o modal
+    if (packageTemplatePreviewContainer && packageTemplatePreview) {
+      packageTemplatePreview.src = '';
+      packageTemplatePreviewContainer.classList.add('hidden');
+    }
+  
     currentComponentRect = rect;
     finalBodyRects = [];
-
+  
     const croppedCanvas = document.createElement('canvas');
     croppedCanvas.width = rect.width;
     croppedCanvas.height = rect.height;
     const croppedCtx = croppedCanvas.getContext('2d');
-    croppedCtx.drawImage(imagePreview, rect.x, rect.y, rect.width, rect.height, 0, 0, rect.width, rect.height);
+    croppedCtx.drawImage(
+      imagePreview,
+      rect.x, rect.y, rect.width, rect.height,
+      0, 0, rect.width, rect.height
+    );
     currentComponentROI_b64 = croppedCanvas.toDataURL('image/png');
-
+  
     componentModal.classList.remove('hidden');
 
     const handleSave = () => {
@@ -477,6 +587,126 @@ document.addEventListener('DOMContentLoaded', () => {
       defineBodyBtn.textContent = '1. Sugerir & Definir Regiões';
     }
   });
+
+  definePolarityBtn.addEventListener('click', () => {
+    if (!currentComponentROI_b64) {
+      alert('Erro: ROI do componente não encontrada.');
+      return;
+    }
+    openPolarityAdjustModal(currentComponentROI_b64);
+  });
+
+  function openPolarityAdjustModal(roi_b64) {
+    polarityAdjustLoading.style.display = 'block';
+    polarityCanvasContainer.innerHTML = '';
+    polarityAdjustModal.classList.remove('hidden');
+
+    isDrawingPolarity = false;
+
+    polarityImg = new Image();
+    polarityImg.src = roi_b64;
+    polarityImg.onload = () => {
+      polarityCanvas = document.createElement('canvas');
+      polarityCtx = polarityCanvas.getContext('2d');
+
+      const containerWidth = polarityCanvasContainer.offsetWidth || polarityImg.width;
+      const containerHeight = (polarityImg.height / polarityImg.width) * containerWidth;
+
+      polarityCanvas.width = containerWidth;
+      polarityCanvas.height = containerHeight;
+
+      polScaleX = polarityImg.width / containerWidth;
+      polScaleY = polarityImg.height / containerHeight;
+
+      polarityCanvasContainer.appendChild(polarityCanvas);
+
+      drawPolarityCanvas();
+
+      polarityCanvas.addEventListener('mousedown', polarityMouseDown);
+      polarityCanvas.addEventListener('mousemove', polarityMouseMove);
+      polarityCanvas.addEventListener('mouseup', polarityMouseUp);
+      polarityCanvas.addEventListener('mouseleave', polarityMouseUp);
+
+      polarityAdjustLoading.style.display = 'none';
+    };
+  }
+
+  function drawPolarityCanvas() {
+    if (!polarityCtx || !polarityImg) return;
+    polarityCtx.clearRect(0, 0, polarityCanvas.width, polarityCanvas.height);
+    polarityCtx.drawImage(polarityImg, 0, 0, polarityCanvas.width, polarityCanvas.height);
+
+    if (currentPolarityRect) {
+      polarityCtx.save();
+      polarityCtx.strokeStyle = '#10b981'; // verde
+      polarityCtx.lineWidth = 2;
+      const vx = currentPolarityRect.x / polScaleX;
+      const vy = currentPolarityRect.y / polScaleY;
+      const vw = currentPolarityRect.width / polScaleX;
+      const vh = currentPolarityRect.height / polScaleY;
+      polarityCtx.strokeRect(vx, vy, vw, vh);
+      polarityCtx.restore();
+    }
+  }
+
+  function polarityMouseDown(e) {
+    const rect = polarityCanvas.getBoundingClientRect();
+    polStartX = e.clientX - rect.left;
+    polStartY = e.clientY - rect.top;
+    isDrawingPolarity = true;
+    currentPolarityRect = null;
+  }
+
+  function polarityMouseMove(e) {
+    if (!isDrawingPolarity) return;
+    const rect = polarityCanvas.getBoundingClientRect();
+    const currentX = e.clientX - rect.left;
+    const currentY = e.clientY - rect.top;
+
+    const x = Math.min(polStartX, currentX);
+    const y = Math.min(polStartY, currentY);
+    const w = Math.abs(currentX - polStartX);
+    const h = Math.abs(currentY - polStartY);
+
+    currentPolarityRect = {
+      x: Math.round(x * polScaleX),
+      y: Math.round(y * polScaleY),
+      width: Math.max(1, Math.round(w * polScaleX)),
+      height: Math.max(1, Math.round(h * polScaleY))
+    };
+
+    drawPolarityCanvas();
+  }
+
+  function polarityMouseUp() {
+    if (!isDrawingPolarity) return;
+    isDrawingPolarity = false;
+    drawPolarityCanvas();
+  }
+
+  confirmPolarityBtn.addEventListener('click', () => {
+    if (!currentPolarityRect) {
+      alert('Desenhe um retângulo de polaridade antes de confirmar.');
+      return;
+    }
+    polarityDefinitionDone.classList.remove('hidden');
+    closePolarityAdjustModal();
+  });
+
+  function closePolarityAdjustModal() {
+    polarityAdjustModal.classList.add('hidden');
+    if (polarityCanvas) {
+      polarityCanvas.removeEventListener('mousedown', polarityMouseDown);
+      polarityCanvas.removeEventListener('mousemove', polarityMouseMove);
+      polarityCanvas.removeEventListener('mouseup', polarityMouseUp);
+      polarityCanvas.removeEventListener('mouseleave', polarityMouseUp);
+    }
+  }
+
+  cancelPolarityBtn.addEventListener('click', () => {
+    closePolarityAdjustModal();
+  });
+
 
   function openBodyAdjustModal(roi_b64, suggestionRects) {
     bodyAdjustLoading.style.display = 'block';
@@ -703,21 +933,39 @@ document.addEventListener('DOMContentLoaded', () => {
 
   confirmBodyBtn.addEventListener('click', () => {
     if (currentBodyRects.length === 0) {
-      alert('Por favor, desenhe pelo menos uma região para o corpo.');
+      alert('Defina pelo menos uma região de corpo antes de confirmar.');
       return;
     }
-    finalBodyRects = [...currentBodyRects];
-
-    bodyAdjustModal.classList.add('hidden');
-    bodyCanvasContainer.innerHTML = '';
-    bodyCanvasContainer.style.height = 'auto';
-    bodyCanvas = null;
-    currentBodyRects = [];
-    selectedRectIndex = -1;
-
+  
+    // Copia estática das regiões de corpo
+    finalBodyRects = currentBodyRects.map(r => ({
+      x: Math.round(r.x),
+      y: Math.round(r.y),
+      width: Math.round(r.width),
+      height: Math.round(r.height),
+    }));
+  
+    // Marca visualmente que o corpo foi definido
     bodyDefinitionDone.classList.remove('hidden');
-    defineBodyBtn.classList.add('hidden');
+    bodyAdjustModal.classList.add('hidden');
+  
+    // --- NOVO: se o componente é polarizado, já abre o fluxo de BOX de polaridade ---
+    if (compIsPolarizedCheckbox.checked) {
+      // exibe o container de polaridade
+      polarityDefinitionContainer.classList.remove('hidden');
+      // força o usuário a desenhar novamente, caso já tivesse algo antigo
+      polarityDefinitionDone.classList.add('hidden');
+  
+      if (!currentComponentROI_b64) {
+        alert('Erro: ROI do componente não encontrada para definir a polaridade.');
+        return;
+      }
+  
+      // Abre o modal para desenhar o BOX de polaridade
+      openPolarityAdjustModal(currentComponentROI_b64);
+    }
   });
+  
 
   cancelBodyBtn.addEventListener('click', () => {
     bodyAdjustModal.classList.add('hidden');
@@ -939,69 +1187,45 @@ document.addEventListener('DOMContentLoaded', () => {
       if (!c.package) bodyInfo = 'sem pacote';
       componentsList.innerHTML += `<li class="text-sm">${c.name} (${c.package}, ${c.rotation}°): ${bodyInfo}</li>`;
     });
+    const polText = comp.is_polarized ? ' (polarizado)' : '';
+    li.textContent = `${comp.name} [${comp.package}]${polText} - x:${comp.x}, y:${comp.y}, w:${comp.width}, h:${comp.height}`;
   }
 
-  document.getElementById('productForm').addEventListener('submit', async function (event) {
-    event.preventDefault();
-    if (annotations.fiducials.length < 2) {
-      alert('Você precisa marcar no mínimo 2 fiduciais para um alinhamento preciso.');
-      return;
-    }
-
-    const packagesComCorpoDefinido = new Set(Object.keys(newPackageTemplates));
-    let erroPacote = null;
-
-    document.querySelectorAll('#compPackage option').forEach(opt => {
-      if (
-        opt.value &&
-        opt.value !== '--new--' &&
-        opt.dataset.bodyDefined === 'true' &&
-        parseInt(opt.dataset.templateRoiWidth || '0') > 0
-      ) {
-        packagesComCorpoDefinido.add(opt.value);
-      }
-    });
-
-    for (const comp of annotations.components) {
-      const packageName = comp.package;
-      if (!packagesComCorpoDefinido.has(packageName)) {
-        if (!comp.final_body_rects || comp.final_body_rects.length === 0) {
-          erroPacote = `O componente '${comp.name}' é o primeiro do novo pacote '${packageName}'. Você *deve* definir o corpo para ele no modal.`;
-          break;
-        } else {
-          packagesComCorpoDefinido.add(packageName);
-        }
-      }
-    }
-    if (erroPacote) {
-      alert(erroPacote);
-      return;
-    }
-
-    const formData = new FormData(event.target);
+  productForm = document.getElementById('productForm')
+  productForm.addEventListener('submit', async (e) => {
+    e.preventDefault();
+  
+    // if (!annotations.goldenImage) {
+    //   alert('Selecione uma imagem Golden antes de salvar.');
+    //   return;
+    // }
+  
+    const formData = new FormData(productForm);
+  
     formData.set('fiducials', JSON.stringify(annotations.fiducials));
     formData.set('components', JSON.stringify(annotations.components));
-
-    const button = document.getElementById('saveButton');
-    button.disabled = true;
-    document.getElementById('buttonText').classList.add('hidden');
-    document.getElementById('spinner').classList.remove('hidden');
-
+  
+    // NOVO: manda os templates de pacote (ROI + rects do corpo)
+    formData.set('package_templates', JSON.stringify(newPackageTemplates || {}));
+  
     try {
-      const response = await fetch('/add_product', { method: 'POST', body: formData });
-      const result = await response.json();
-      if (response.ok) {
-        alert('Produto cadastrado com sucesso!');
-        window.location.href = '/';
-      } else {
-        throw new Error(result.error || 'Erro desconhecido.');
+      const resp = await fetch('/add_product', {
+        method: 'POST',
+        body: formData,
+      });
+  
+      const data = await resp.json();
+      if (!resp.ok) {
+        console.error('Erro ao salvar produto:', data);
+        alert(data.error || 'Erro ao salvar produto.');
+        return;
       }
-    } catch (error) {
-      alert('Erro ao cadastrar produto: ' + error.message);
-    } finally {
-      button.disabled = false;
-      document.getElementById('buttonText').classList.remove('hidden');
-      document.getElementById('spinner').classList.add('hidden');
+  
+      alert('Produto salvo com sucesso!');
+      window.location.href = `/inspect?product_id=${data.product_id}`;
+    } catch (err) {
+      console.error('Erro de rede ao salvar produto:', err);
+      alert('Erro de rede ao salvar produto.');
     }
   });
 });

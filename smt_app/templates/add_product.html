@@ -94,7 +94,7 @@
   </div>
 </div>
 
-<!-- Modal: Componente (inclui definição/confirm. do corpo) -->
+<!-- Modal: Componente (inclui definição/confirm. do corpo e polaridade) -->
 <div id="componentModal" class="hidden fixed z-50 inset-0 overflow-y-auto bg-gray-800 bg-opacity-50 flex justify-center items-center">
   <div class="bg-white rounded-lg shadow-lg w-full max-w-2xl p-6">
     <h3 class="text-xl font-semibold mb-4">Novo Componente</h3>
@@ -111,11 +111,18 @@
                class="mt-1 block w-full border-gray-300 rounded-md shadow-sm">
       </div>
 
+      <div class="mb-2 md:col-span-2 flex items-center">
+        <input id="compIsPolarized" type="checkbox"
+               class="h-4 w-4 text-indigo-600 border-gray-300 rounded">
+        <label for="compIsPolarized" class="ml-2 block text-sm font-medium text-gray-700">
+          Componente polarizado?
+        </label>
+      </div>      
+
       <div class="mb-2 md:col-span-2">
         <label for="compPackage" class="block text-sm font-medium text-gray-700">Pacote</label>
         <select id="compPackage" class="mt-1 block w-full border-gray-300 rounded-md shadow-sm">
           <option value="">Selecione...</option>
-          {# ---- Pacotes existentes vindos do backend ---- #}
           {% for package in packages %}
             <option value="{{ package.name }}"
                     data-presence="{{ '%.2f' % (package.presence_threshold or 0.35) }}"
@@ -170,12 +177,29 @@
       </div>
     </div>
 
+    <!-- Definição de BOX de polaridade (AGORA DENTRO DO MODAL) -->
+    <div id="polarityDefinitionContainer"
+         class="hidden mt-4 p-3 rounded border border-emerald-300 bg-emerald-50">
+      <div class="text-sm text-emerald-800 mb-2">
+        Este componente é polarizado. Desenhe um BOX de polaridade dentro da ROI do corpo.
+      </div>
+      <div class="flex items-center gap-2">
+        <button id="definePolarityBtn" class="btn-primary">
+          2. Definir BOX de Polaridade
+        </button>
+        <span id="polarityDefinitionDone" class="hidden text-green-700 font-medium">
+          Polarity BOX definido ✓
+        </span>
+      </div>
+    </div>
+
     <div class="mt-6 flex justify-end space-x-2">
       <button id="saveComponentBtn" class="btn-primary">Salvar</button>
       <button id="cancelComponentBtn" class="btn-secondary">Cancelar</button>
     </div>
   </div>
 </div>
+
 
 <!-- Modal: Ajuste de corpo (desenho de múltiplas regiões) -->
 <div id="bodyAdjustModal" class="hidden fixed z-[60] inset-0 overflow-y-auto bg-gray-800 bg-opacity-50 flex justify-center items-center">
@@ -194,6 +218,47 @@
     </div>
   </div>
 </div>
+
+<!-- Modal: Definição de BOX de polaridade -->
+<div id="polarityAdjustModal"
+     class="hidden fixed z-[65] inset-0 overflow-y-auto bg-gray-800 bg-opacity-50 flex justify-center items-center">
+  <div class="bg-white rounded-lg shadow-lg w-full max-w-3xl p-6">
+    <h3 class="text-xl font-semibold mb-4">Definir BOX de Polaridade</h3>
+
+    <div id="polarityAdjustLoading" class="mb-3 text-sm text-gray-600">Carregando ROI...</div>
+
+    <div id="polarityCanvasContainer"
+         class="relative w-full min-h-[200px] bg-gray-100 rounded border overflow-hidden"></div>
+
+    <p class="mt-2 text-xs text-gray-500">
+      Clique e arraste para desenhar um único retângulo indicando a região de polaridade
+      (marcações como círculo, quadrado, barra, etc.).
+    </p>
+
+    <div class="mt-4 flex justify-end space-x-2">
+      <button id="confirmPolarityBtn" class="btn-primary">Confirmar BOX</button>
+      <button id="cancelPolarityBtn" class="btn-secondary">Cancelar</button>
+    </div>
+  </div>
+</div>
+
+
+<!-- Definição de box de polaridade -->
+<!-- <div id="polarityDefinitionContainer"
+     class="hidden mt-4 p-3 rounded border border-emerald-300 bg-emerald-50">
+  <div class="text-sm text-emerald-800 mb-2">
+    Este componente é polarizado. Desenhe um BOX de polaridade dentro da ROI do corpo.
+  </div>
+  <div class="flex items-center gap-2">
+    <button id="definePolarityBtn" class="btn-primary">
+      2. Definir BOX de Polaridade
+    </button>
+    <span id="polarityDefinitionDone" class="hidden text-green-700 font-medium">
+      Polarity BOX definido ✓
+    </span>
+  </div>
+</div> -->
+
 
 <!-- Modal: Confirmação de posição do corpo -->
 <div id="bodyConfirmModal" class="hidden fixed z-[60] inset-0 overflow-y-auto bg-gray-800 bg-opacity-50 flex justify-center items-center">

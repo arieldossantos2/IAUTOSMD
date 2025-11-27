@@ -107,57 +107,126 @@ document.getElementById('inspectForm').addEventListener('submit', async function
             const cvStatusColor = comp.cv_status === 'OK' ? 'text-green-500' : (comp.cv_status === 'UNKNOWN' ? 'text-gray-500' : 'text-red-500');
             const aiStatusColor = comp.ai_status === 'OK' ? 'text-green-500' : (comp.ai_status === 'UNKNOWN' ? 'text-gray-500' : 'text-red-500');
 
-            const ssim = comp.cv_details.ssim ? comp.cv_details.ssim.toFixed(2) : 'N/A';
-            const corr = comp.cv_details.correlation_score ? comp.cv_details.correlation_score.toFixed(2) : 'N/A';
-            const prob = comp.ai_details.prob ? comp.ai_details.prob.toFixed(2) : 'N/A';
+            const ssim = (comp.cv_details && typeof comp.cv_details.ssim === 'number')
+                ? comp.cv_details.ssim.toFixed(2)
+                : 'N/A';
+
+            const corr = (comp.cv_details && typeof comp.cv_details.correlation_score === 'number')
+                ? comp.cv_details.correlation_score.toFixed(2)
+                : 'N/A';
+
+                const prob = (comp.ai_details && typeof comp.ai_details.prob === 'number')
+                    ? comp.ai_details.prob.toFixed(2)
+                    : 'N/A';
+
+                const aiSuggestion = comp.ai_details && comp.ai_details.suggestion
+                    ? comp.ai_details.suggestion
+                    : 'IA ainda em fase de aprendizado; use apenas como apoio visual.';
+
+                const aiComment = comp.ai_details && comp.ai_details.comment
+                    ? comp.ai_details.comment
+                    : '';
+
+                const aiDecisionRule = comp.ai_details && comp.ai_details.decision_rule
+                    ? comp.ai_details.decision_rule
+                    : 'A IA não está influenciando diretamente a decisão final neste momento.';
+
+                const aiUsedInFinal = comp.ai_details && comp.ai_details.used_in_final;
+                const aiInfluenceText = aiUsedInFinal
+                    ? '✅ A opinião da IA FOI usada na decisão final deste componente.'
+                    : 'ℹ️ A opinião da IA NÃO mudou a decisão final; foi apenas um apoio à visão computacional.';
+
+
             // ATUALIZADO (Sugestão 5): Adiciona métrica de cor
             const color = comp.cv_details.color_similarity ? comp.cv_details.color_similarity.toFixed(2) : 'N/A';
             
             const detailsHtml = `
-                <p><strong>Status Final: <span class="${finalStatusColor} font-bold">${comp.final_status}</span></strong></p>
-                <p>Análise CV: <span class="${cvStatusColor}">${comp.cv_status}</span> (SSIM: ${ssim}, Corr: ${corr})</p>
-                <p>Análise Cor: <span class="text-gray-600">${color}</span></p> 
-                <p class_="${aiStatusColor}">Análise IA: <span class="${aiStatusColor}">${comp.ai_status}</span> (Prob: ${prob})</p>
-                <p class="text-xs text-gray-500">CV Msg: ${comp.cv_details.message}</p>
+                <p><strong>Status Final:
+                    <span class="${finalStatusColor} font-bold">${comp.final_status}</span>
+                </strong></p>
+
+                <p>Análise CV:
+                    <span class="${cvStatusColor}">${comp.cv_status}</span>
+                    (SSIM: ${ssim}, Corr: ${corr})
+                </p>
+
+                <p>Análise Cor:
+                    <span class="text-gray-600">${color}</span>
+                </p>
+
+                <p>Análise IA:
+                    <span class="${aiStatusColor}">${comp.ai_status}</span>
+                    (Prob: ${prob})
+                </p>
+                <p class="text-xs text-gray-600">${aiSuggestion}</p>
+                <p class="text-xs text-gray-500">${aiComment}</p>
+                <p class="text-xs ${aiUsedInFinal ? 'text-green-700' : 'text-gray-500'}">
+                    ${aiInfluenceText}
+                </p>
+                <p class="text-[11px] text-gray-400 mt-1">
+                    Regra de uso da IA: ${aiDecisionRule}
+                </p>
+
+                <p class="text-xs text-gray-500 mt-2">CV Msg: ${comp.cv_details.message}</p>
                 <p>Rotação: ${comp.found_rotation} | Desloc. (x,y): (${comp.displacement.x}, ${comp.displacement.y})</p>
             `;
 
-            let debugImagesHtml = '';
-            let gridColsClass = 'grid-cols-2'; // Padrão: Golden e Inspecionado
 
-            if (comp.debug_data && comp.debug_data.debug_img_b64) {
-                gridColsClass = 'md:grid-cols-2 lg:grid-cols-3'; 
-                
-                debugImagesHtml += `
-                    <div class="text-center">
-                        <span class="block text-sm font-semibold mb-1">Debug (Match)</span>
-                        <img src="/static/debug/${comp.debug_filename}?t=${Date.now()}" 
-                             alt="Depuração da Análise CV" 
-                             class="w-24 h-24 object-contain rounded-md border-2 border-yellow-400 bg-black mx-auto">
-                        <p class="text-xs text-gray-500">Verde: Corpo encontrado</p>
-                    </div>
-                `;
-                
-                debugImagesHtml += `
-                    <div class="text-center">
-                        <span class="block text-sm font-semibold mb-1">Golden (Corpo)</span>
-                        <img src="data:image/png;base64,${comp.debug_data.target_ssim_b64}" alt="Golden Body" class="w-24 h-24 object-contain rounded-md border-2 border-blue-400 bg-black mx-auto">
-                    </div>
-                    <div class="text-center">
-                        <span class="block text-sm font-semibold mb-1">Encontrado (Corpo)</span>
-                        <img src="data:image/png;base64,${comp.debug_data.found_comp_b64}" alt="Found Body" class="w-24 h-24 object-contain rounded-md border-2 border-blue-400 bg-black mx-auto">
-                    </div>
-                `;
+            let debugImagesHtml = '';
+            let gridColsClass = 'grid-cols-2'; // padrão: Golden e Inspecionado
+
+            const hasDebugMatch = comp.debug_data && comp.debug_data.debug_img_b64;
+            const hasBodyDebug =
+                comp.debug_data &&
+                typeof comp.debug_data.target_ssim_b64 === 'string' &&
+                comp.debug_data.target_ssim_b64 &&
+                typeof comp.debug_data.found_comp_b64 === 'string' &&
+                comp.debug_data.found_comp_b64;
+
+            if (hasDebugMatch || hasBodyDebug) {
+                // Se tiver corpo, mostramos 3 colunas; se não, mantemos 2
+                gridColsClass = hasBodyDebug ? 'md:grid-cols-2 lg:grid-cols-3' : 'grid-cols-2';
+
+                if (hasDebugMatch) {
+                    debugImagesHtml += `
+                        <div class="text-center">
+                            <span class="block text-sm font-semibold mb-1">Debug (Match)</span>
+                            <img src="/static/debug/${comp.debug_filename}?t=${Date.now()}"
+                                alt="Depuração da Análise CV"
+                                class="w-24 h-24 object-contain rounded-md border-2 border-yellow-400 bg-black mx-auto">
+                            <p class="text-xs text-gray-500">Verde: Corpo encontrado</p>
+                        </div>
+                    `;
+                }
+
+                if (hasBodyDebug) {
+                    debugImagesHtml += `
+                        <div class="text-center">
+                            <span class="block text-sm font-semibold mb-1">Golden (Corpo)</span>
+                            <img src="data:image/png;base64,${comp.debug_data.target_ssim_b64}"
+                                alt="Golden Body"
+                                class="w-24 h-24 object-contain rounded-md border-2 border-blue-400 bg-black mx-auto">
+                        </div>
+                        <div class="text-center">
+                            <span class="block text-sm font-semibold mb-1">Encontrado (Corpo)</span>
+                            <img src="data:image/png;base64,${comp.debug_data.found_comp_b64}"
+                                alt="Found Body"
+                                class="w-24 h-24 object-contain rounded-md border-2 border-blue-400 bg-black mx-auto">
+                        </div>
+                    `;
+                }
             }
 
 
+            const polText = comp.is_polarized ? 'Sim' : 'Não';
+
             const cardHtml = `
                 <div class="bg-gray-50 p-4 rounded-lg shadow-sm border">
-                    <h4 class="font-bold text-lg mb-2">${comp.name} (${comp.package})</h4>
+                    <h4 class="font-bold text-lg mb-1">${comp.name} (${comp.package})</h4>
+                    <p class="text-xs text-indigo-600 mb-2">Componente polarizado: <strong>${polText}</strong></p>
                     <div class="text-xs text-gray-600 space-y-1 bg-gray-100 p-2 rounded mb-4">
                         ${detailsHtml}
                     </div>
-                    
                     <div class="grid ${gridColsClass} gap-2 items-start justify-center">
                         <div class="text-center">
                             <span class="block text-sm font-semibold mb-1">Golden (ROI)</span>

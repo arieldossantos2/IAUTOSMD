@@ -111,84 +111,155 @@ def inspect_board():
         inspection_id = cursor.lastrowid
 
         for comp in comps:
-            roi_g = golden_full[comp['y']:comp['y'] + comp['height'], comp['x']:comp['x'] + comp['width']]
-            roi_p = produced_aligned[comp['y']:comp['y'] + comp['height'], comp['x']:comp['x'] + comp['width']]
+            # Recorta as ROIs
+            roi_g = golden_full[comp['y']:comp['y'] + comp['height'],
+                                comp['x']:comp['x'] + comp['width']]
+            roi_p = produced_aligned[comp['y']:comp['y'] + comp['height'],
+                                     comp['x']:comp['x'] + comp['width']]
 
-            template_img_path = os.path.join(current_app.static_folder, comp['body_matrix'])
-            template_img = cv2.imread(template_img_path)
-            template_mask_path = comp['body_mask']  # já é caminho relativo
+            # Caminhos do template e da máscara
+            body_matrix_rel = comp.get('body_matrix')
+            if body_matrix_rel:
+                template_img_path = os.path.join(current_app.static_folder, body_matrix_rel)
+                template_img = cv2.imread(template_img_path)
+            else:
+                template_img = None
 
-            if template_img is None or template_mask_path is None:
-                print(f"ERRO: Não foi possível ler o template ({template_img_path}) ou a máscara ({template_mask_path}) para {comp['name']}")
+            # Carrega a máscara como imagem em escala de cinza
+            template_mask = None
+            body_mask_rel = comp.get('body_mask')
+            if body_mask_rel:
+                mask_abs_path = os.path.join(current_app.static_folder, body_mask_rel)
+                template_mask = cv2.imread(mask_abs_path, cv2.IMREAD_GRAYSCALE)
+
+            # Thresholds com default
+            presence_threshold = comp.get('presence_threshold', 0.35)
+            ssim_threshold = comp.get('ssim_threshold', 0.60)
+
+            # Sempre inicializa esses caras para evitar UnboundLocalError
+            cv_status = 'UNKNOWN'
+            cv_msg = ''
+            cv_analysis = {
+                'status': 'UNKNOWN',
+                'details': {},
+                'debug_data': {},
+                'found_rotation': 'N/A',
+                'displacement': {'x': 0, 'y': 0},
+            }
+            ai_status = 'UNKNOWN'
+            ai_details = {'prob': 0.0}
+
+            if template_img is None or template_mask is None:
+                print(f"ERRO: Não foi possível ler template/máscara para {comp['name']}")
                 cv_status = 'FAIL'
-                ai_status = 'UNKNOWN'
-                cv_analysis = {
-                    'status': 'FAIL',
-                    'details': {'message': 'Arquivo de template/máscara do pacote não encontrado.'}
-                }
-                ai_details = {'prob': 0.0}
+                cv_msg = "Arquivo de template/máscara do pacote não encontrado."
+                cv_analysis['status'] = 'FAIL'
+                cv_analysis['details'] = {'message': cv_msg}
             else:
                 cv_analysis = analyze_component_package_based(
                     roi_g,
                     template_img,
-                    template_mask_path,  # Passa o CAMINHO da máscara
+                    template_mask,
                     roi_p,
-                    comp['rotation'],
-                    presence_threshold=comp.get('presence_threshold', 0.35),
-                    ssim_threshold=comp.get('ssim_threshold', 0.6)
+                    comp.get('rotation', 0),
+                    presence_threshold=presence_threshold,
+                    ssim_threshold=ssim_threshold,
+                    polarity_box=comp.get('polarity_box')
                 )
                 cv_status = cv_analysis.get('status', 'FAIL')
-                ai_status, ai_details = predict_with_model(roi_p)
+                cv_msg = cv_analysis.get('details', {}).get('message', '')
 
-            final_status = "OK" if cv_status == "OK" or (ai_status == "OK") else "FAIL"
+                # 🔴 ANTES:
+                # ai_status, ai_details = predict_with_model(roi_p)
+
+                # ✅ AGORA: passa golden + produced para a rede siamesa
+                ai_status, ai_details = predict_with_model(roi_g, roi_p)
+
+            # --------- Regra de decisão final ---------
+            prob = ai_details.get('prob') or 0.0
+            ia_ok = (ai_status == "OK" and prob >= 0.85)
+            # OR entre CV e IA (com prob >= 0.85)
+            final_status = "OK" if (cv_status == "OK" or ia_ok) else "FAIL"
+
+            # Completa ai_details com info de como ela foi usada
+            ai_details = ai_details or {}
+            ai_details.setdefault('prob', prob)
+            ai_details['used_in_final'] = bool(ia_ok)
+            ai_details['decision_rule'] = (
+                "A IA só é considerada para virar o componente para OK se prob >= 0.85. "
+                "Caso contrário, ela é apenas apoio (CV domina a decisão)."
+            )
+            ai_details.setdefault(
+                'suggestion',
+                "IA sugere que o componente está OK (match com golden)." if ai_status == "OK"
+                else "IA sugere que o componente está com desvio em relação ao golden."
+            )
+
+            # --------- Regra de decisão final ---------
+            prob = ai_details.get('prob') or 0.0
+            ia_ok = (ai_status == "OK" and prob >= 0.85)
+            # OR entre CV e IA (com prob >= 0.85)
+            final_status = "OK" if (cv_status == "OK" or ia_ok) else "FAIL"
 
             if final_status == "OK":
                 total_ok += 1
             else:
                 total_fail += 1
 
+            # Desenha retângulo no overlay
             x, y, w, h = comp['x'], comp['y'], comp['width'], comp['height']
             color = (0, 255, 0) if final_status == "OK" else (0, 0, 255)
             cv2.rectangle(result_image, (x, y), (x + w, y + h), color, 2)
-            cv2.putText(result_image, f"{comp['name']}", (x, y - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
+            cv2.putText(result_image, f"{comp['name']}", (x, y - 5),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
 
+            # Salva ROIs em disco
             roi_g_path = save_image_to_disk(roi_g, 'results', f"insp_{inspection_id}_comp_{comp['id']}_g")
             roi_p_path = save_image_to_disk(roi_p, 'results', f"insp_{inspection_id}_comp_{comp['id']}_p")
 
+            # Persiste no inspection_results
             cursor.execute("""
                 INSERT INTO inspection_results 
                 (inspection_id, component_id, cv_status, ai_status, ai_status_prob, cv_details, final_status, golden_roi_image, produced_roi_image)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 inspection_id, comp['id'], cv_status, ai_status, ai_details.get('prob'),
-                json.dumps(cv_analysis.get('details')), final_status,
+                json.dumps(cv_analysis.get('details', {})), final_status,
                 roi_g_path, roi_p_path
             ))
 
+            # Debug image opcional
             debug_filename = None
-            if 'debug_data' in cv_analysis and 'debug_img_b64' in cv_analysis['debug_data']:
-                debug_img = base64_to_cv2_img(cv_analysis['debug_data']['debug_img_b64'])
+            debug_data = cv_analysis.get('debug_data', {})
+            if isinstance(debug_data, dict) and 'debug_img_b64' in debug_data:
+                debug_img = base64_to_cv2_img(debug_data['debug_img_b64'])
                 if debug_img is not None:
                     debug_filename = f"debug_{inspection_id}_{comp['name']}_{uuid.uuid4().hex[:4]}.png"
                     debug_path = os.path.join(current_app.config['DEBUG_FOLDER'], debug_filename)
                     cv2.imwrite(debug_path, debug_img)
 
+            # Dados para o frontend
             comp_data_for_frontend = {
-                'name': comp['name'], 'component_id': comp['id'], 'package': comp['package_name'],
+                'name': comp['name'],
+                'component_id': comp['id'],
+                'package': comp['package_name'],
+                'rotation': comp['rotation'],
+                'is_polarized': bool(comp.get('is_polarized', 0)),
                 'golden_image': cv2_to_base64(roi_g),
                 'produced_image': cv2_to_base64(roi_p),
                 'cv_status': cv_status,
+                'cv_msg': cv_msg,
                 'ai_status': ai_status,
+                'ai_details': ai_details,
                 'final_status': final_status,
                 'cv_details': cv_analysis.get('details', {}),
-                'ai_details': ai_details,
                 'found_rotation': cv_analysis.get('found_rotation', 'N/A'),
                 'displacement': cv_analysis.get('displacement', {'x': 0, 'y': 0}),
                 'debug_filename': debug_filename,
-                'debug_data': cv_analysis.get('debug_data', {})
+                'debug_data': debug_data,
             }
-            detailed_components_frontend.append(comp_data_for_frontend)
 
+            detailed_components_frontend.append(comp_data_for_frontend)
         overall_status = "OK" if total_fail == 0 else "FAIL"
         cursor.execute("UPDATE inspections SET result = ? WHERE id = ?", (overall_status, inspection_id))
         conn.commit()

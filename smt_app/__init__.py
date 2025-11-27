@@ -10,20 +10,14 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
 def load_trained_model():
-    """Carrega o modelo MultiTaskCNN treinado ou inicializa um novo."""
+    """
+    Mantido só por compatibilidade.
+    A IA principal agora é a rede siamesa (siamese_model.pt),
+    carregada dentro de smt_app/vision.py.
+    """
     global model
-    model_path = 'trained_model.pt'
-    model = MultiTaskCNN()
-    if os.path.exists(model_path):
-        try:
-            model.load_state_dict(torch.load(model_path, map_location=device))
-            print(f"✅ Modelo treinado '{model_path}' carregado com sucesso.")
-        except Exception as e:
-            print(f"⚠️ Erro ao carregar o modelo: {e}. Usando modelo não treinado.")
-    else:
-        print(f"Aviso: Arquivo de modelo '{model_path}' não encontrado. Usando modelo não treinado.")
-    model.to(device)
-    model.eval()
+    model = None
+    print("[init] Nenhum modelo MultiTaskCNN carregado. Inspeção IA usa SiameseNetwork (siamese_model.pt).")
 
 
 # --- Login Manager ---

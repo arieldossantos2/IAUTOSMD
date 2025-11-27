@@ -1,5 +1,5 @@
 from flask import Blueprint, render_template, request, jsonify, current_app
-from flask_login import login_required
+from flask_login import login_required, current_user
 import sqlite3
 import json
 import traceback
@@ -43,255 +43,203 @@ def find_fiducials_route():
 @bp.route('/add_product', methods=['GET', 'POST'])
 @login_required
 def add_product():
-    if request.method == 'POST':
-        conn, cursor = None, None
-        try:
-            name = request.form.get('name')
-            golden_file = request.files.get('golden')
-            fiducials_json = request.form.get('fiducials')
-            components_json = request.form.get('components')
+    if request.method == 'GET':
+        conn = get_db_connection()
+        cursor = conn.cursor()
 
-            if not all([name, golden_file, fiducials_json, components_json]):
-                return jsonify({'error': 'Dados incompletos.'}), 400
+        cursor.execute("""
+            SELECT id, name, presence_threshold, ssim_threshold,
+                   body_matrix, template_roi_width, template_roi_height
+            FROM packages
+            ORDER BY name
+        """)
+        packages = cursor.fetchall()
+        cursor.close()
+        conn.close()
 
-            # Salva a imagem golden
-            golden_img = cv2.imdecode(np.frombuffer(golden_file.read(), np.uint8), cv2.IMREAD_COLOR)
-            golden_path_db = save_image_to_disk(
-                golden_img,
-                'uploads',
-                f"golden_{str(uuid.uuid4())[:8]}"
-            )
-            if not golden_path_db:
-                return jsonify({'error': 'Falha ao salvar a imagem golden.'}), 500
+        return render_template('add_product.html', packages=packages)
 
-            # Abre conexão
-            conn = get_db_connection()
-            cursor = conn.cursor()
-
-            # Salva produto (schema atual: name, golden_image, fiducials como JSON)
-            cursor.execute(
-                "INSERT INTO products (name, golden_image, fiducials) VALUES (?, ?, ?)",
-                (name, golden_path_db, fiducials_json)
-            )
-            product_id = cursor.lastrowid
-
-            components = json.loads(components_json)
-            package_info = {}
-
-            for comp in components:
-                package_name = comp['package']
-                if not package_name:
-                    conn.rollback()
-                    return jsonify({'error': f"Componente '{comp.get('name','?')}' sem pacote definido."}), 400
-
-                # Busca/cria pacote
-                if package_name not in package_info:
-                    cursor.execute(
-                        "SELECT id, body_matrix, body_mask, template_roi_width, template_roi_height "
-                        "FROM packages WHERE name = ?",
-                        (package_name,)
-                    )
-                    pkg_data = cursor.fetchone()
-                    if not pkg_data:
-                        cursor.execute(
-                            "INSERT INTO packages (name, presence_threshold, ssim_threshold) "
-                            "VALUES (?, ?, ?)",
-                            (package_name, 0.35, 0.6)
-                        )
-                        package_id = cursor.lastrowid
-                        package_info[package_name] = {
-                            'id': package_id,
-                            'has_matrix': False,
-                            'template_roi_width': None,
-                            'template_roi_height': None
-                        }
-                    else:
-                        # sqlite3.Row => acesso por nome
-                        package_info[package_name] = {
-                            'id': pkg_data['id'],
-                            'has_matrix': bool(pkg_data['body_matrix']),
-                            'template_roi_width': pkg_data['template_roi_width'],
-                            'template_roi_height': pkg_data['template_roi_height']
-                        }
-
-                package_id = package_info[package_name]['id']
-
-                # Se ainda não existe template/máscara para este pacote, cria agora
-                if not package_info[package_name]['has_matrix']:
-                    print(f"Criando novo template e máscara multi-região para: {package_name}")
-
-                    if 'component_roi_b64' not in comp or 'final_body_rects' not in comp:
-                        conn.rollback()
-                        return jsonify({
-                            'error': f"Componente '{comp['name']}' é o primeiro do pacote '{package_name}', "
-                                     f"mas os dados de definição do corpo (ROI e Rects) não foram enviados."
-                        }), 400
-
-                    roi_g_img = base64_to_cv2_img(comp['component_roi_b64'])
-                    rects = comp['final_body_rects']
-
-                    if roi_g_img is None:
-                        conn.rollback()
-                        return jsonify({'error': f"Falha ao decodificar a ROI para '{comp['name']}'."}), 400
-                    if not rects:
-                        conn.rollback()
-                        return jsonify({'error': f"Nenhuma região de corpo definida para '{comp['name']}'."}), 400
-
-                    h_roi, w_roi = roi_g_img.shape[:2]
-
-                    # normaliza rects dentro da ROI
-                    norm_rects = []
-                    for r in rects:
-                        rx = int(round(r.get('x', 0)))
-                        ry = int(round(r.get('y', 0)))
-                        rw = int(round(r.get('width', 0)))
-                        rh = int(round(r.get('height', 0)))
-
-                        if rw < 0:
-                            rx += rw
-                            rw = -rw
-                        if rh < 0:
-                            ry += rh
-                            rh = -rh
-
-                        rx = max(0, min(rx, w_roi - 1))
-                        ry = max(0, min(ry, h_roi - 1))
-                        rw = max(1, min(rw, w_roi - rx))
-                        rh = max(1, min(rh, h_roi - ry))
-
-                        norm_rects.append({'x': rx, 'y': ry, 'width': rw, 'height': rh})
-
-                    if not norm_rects:
-                        conn.rollback()
-                        return jsonify({
-                            'error': f"Nenhuma região de corpo válida para '{comp['name']}'."
-                        }), 400
-
-                    # Bounding box geral do corpo
-                    min_x = min(r['x'] for r in norm_rects)
-                    min_y = min(r['y'] for r in norm_rects)
-                    max_x = max(r['x'] + r['width'] for r in norm_rects)
-                    max_y = max(r['y'] + r['height'] for r in norm_rects)
-
-                    bb_x = int(min_x)
-                    bb_y = int(min_y)
-                    bb_w = int(max(1, max_x - min_x))
-                    bb_h = int(max(1, max_y - min_y))
-
-                    if bb_x >= w_roi or bb_y >= h_roi:
-                        conn.rollback()
-                        return jsonify({
-                            'error': f"Bounding box do corpo fora da ROI para '{comp['name']}'."
-                        }), 400
-                    bb_w = min(bb_w, w_roi - bb_x)
-                    bb_h = min(bb_h, h_roi - bb_y)
-
-                    # recorta template bruto
-                    body_template_img = roi_g_img[bb_y:bb_y + bb_h, bb_x:bb_x + bb_w]
-                    if body_template_img is None or body_template_img.size == 0:
-                        conn.rollback()
-                        return jsonify({
-                            'error': f"Região de corpo (Bounding Box) inválida para '{comp['name']}'."
-                        }), 400
-
-                    # cria máscara no bounding box
-                    body_mask_img = np.zeros((bb_h, bb_w), dtype=np.uint8)
-                    for r in norm_rects:
-                        rel_x = int(r['x'] - bb_x)
-                        rel_y = int(r['y'] - bb_y)
-                        rel_w = int(r['width'])
-                        rel_h = int(r['height'])
-
-                        if rel_x < 0 or rel_y < 0:
-                            continue
-
-                        x2 = min(rel_x + rel_w, bb_w)
-                        y2 = min(rel_y + rel_h, bb_h)
-                        if x2 > rel_x and y2 > rel_y:
-                            cv2.rectangle(
-                                body_mask_img,
-                                (rel_x, rel_y),
-                                (x2, y2),
-                                255, -1
-                            )
-
-                    # --- normaliza template/máscara do pacote para 0° ---
-                    initial_rotation = int(comp.get('rotation', 0)) % 360
-                    inverse_rotation = (-initial_rotation) % 360
-
-                    body_template_img, body_mask_img = _rotate_template_and_mask(
-                        body_template_img,
-                        body_mask_img,
-                        inverse_rotation
-                    )
-
-                    # salva template e máscara alinhados a 0°
-                    body_matrix_path = save_image_to_disk(
-                        body_template_img, 'packages', f"pkg_{package_id}_{package_name}_template"
-                    )
-                    body_mask_path = save_image_to_disk(
-                        body_mask_img, 'packages', f"pkg_{package_id}_{package_name}_mask"
-                    )
-
-                    if not body_matrix_path or not body_mask_path:
-                        conn.rollback()
-                        return jsonify({
-                            'error': f"Falha ao salvar arquivos de template/máscara para o pacote '{package_name}'."
-                        }), 500
-
-                    # Atualiza pacote com template + máscara + tamanho da ROI usada na definição
-                    cursor.execute(
-                        """UPDATE packages
-                           SET body_matrix = ?, body_mask = ?, template_roi_width = ?, template_roi_height = ?
-                           WHERE id = ?""",
-                        (body_matrix_path, body_mask_path, w_roi, h_roi, package_id)
-                    )
-                    package_info[package_name]['has_matrix'] = True
-                    package_info[package_name]['template_roi_width'] = w_roi
-                    package_info[package_name]['template_roi_height'] = h_roi
-
-                # Salva o componente
-                cursor.execute(
-                    """INSERT INTO components (product_id, name, x, y, width, height, package_id, rotation)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-                    (
-                        product_id, comp['name'], comp['x'], comp['y'], comp['width'],
-                        comp['height'], package_id, comp.get('rotation', 0)
-                    )
-                )
-
-            conn.commit()
-            return jsonify({'success': True, 'product_id': product_id})
-
-        except sqlite3.Error as db_err:
-            if conn:
-                conn.rollback()
-            traceback.print_exc()
-            return jsonify({'error': f'Erro de Banco de Dados: {db_err}'}), 500
-        except Exception as e:
-            if conn:
-                conn.rollback()
-            traceback.print_exc()
-            return jsonify({'error': str(e)}), 500
-        finally:
-            if cursor:
-                cursor.close()
-            if conn:
-                conn.close()
-
-    # GET request: carrega pacotes para o select (inclui template_roi_* para o JS)
+    # POST
     conn = get_db_connection()
     cursor = conn.cursor()
-    cursor.execute(
-        "SELECT id, name, presence_threshold, ssim_threshold, body_matrix, "
-        "template_roi_width, template_roi_height "
-        "FROM packages ORDER BY name"
-    )
-    packages = cursor.fetchall()
-    cursor.close()
-    conn.close()
-    return render_template('add_product.html', packages=packages)
 
+    try:
+        name = request.form.get('name')
+        golden_file = request.files.get('golden')
+        fiducials_json = request.form.get('fiducials')
+        components_json = request.form.get('components')
+        package_templates_json = request.form.get('package_templates') or '{}'
+
+        if not name or not golden_file or not components_json:
+            return jsonify({'error': 'Nome, imagem Golden ou componentes faltando.'}), 400
+
+        try:
+            fiducials = json.loads(fiducials_json) if fiducials_json else []
+        except Exception:
+            fiducials = []
+
+        try:
+            components = json.loads(components_json)
+        except Exception as e:
+            print("[add_product] Erro ao decodificar components_json:", e)
+            return jsonify({'error': 'JSON de componentes inválido.'}), 400
+
+        try:
+            package_templates = json.loads(package_templates_json)
+        except Exception as e:
+            print("[add_product] Erro ao decodificar package_templates_json:", e)
+            package_templates = {}
+
+        # Salva a Golden
+        golden_bytes = golden_file.read()
+        golden_cv = cv2.imdecode(np.frombuffer(golden_bytes, np.uint8), cv2.IMREAD_COLOR)
+        if golden_cv is None:
+            return jsonify({'error': 'Falha ao ler imagem Golden.'}), 400
+
+        golden_rel_path = save_image_to_disk(
+            golden_cv,
+            'uploads',
+            f"golden_{uuid.uuid4().hex[:8]}"
+        )
+
+        cursor.execute(
+            """
+            INSERT INTO products (name, golden_image, fiducials, created_by)
+            VALUES (?, ?, ?, ?)
+            """,
+            (name, golden_rel_path, json.dumps(fiducials), current_user.id)
+        )
+        product_id = cursor.lastrowid
+
+        # --- Pacotes e componentes ---
+        package_info = {}  # cache: package_name -> {id, body_matrix, body_mask, template_roi_width, template_roi_height}
+
+        for comp in components:
+            comp_name = comp.get('name')
+            x = int(comp.get('x', 0))
+            y = int(comp.get('y', 0))
+            width = int(comp.get('width', 0))
+            height = int(comp.get('height', 0))
+            rotation = int(comp.get('rotation', 0))
+            package_name = comp.get('package') or 'DEFAULT'
+            is_polarized = 1 if comp.get('is_polarized') else 0
+            polarity_box = comp.get('polarity_rect')
+            if polarity_box is not None and not isinstance(polarity_box, str):
+                polarity_box = json.dumps(polarity_box)
+
+            if not comp_name or width <= 0 or height <= 0:
+                print(f"[add_product] Componente ignorado por dados inválidos: {comp}")
+                continue
+
+            # --- Busca ou cria o pacote ---
+            if package_name not in package_info:
+                cursor.execute(
+                    """
+                    SELECT id, body_matrix, body_mask, template_roi_width, template_roi_height
+                    FROM packages
+                    WHERE name = ?
+                    """,
+                    (package_name,)
+                )
+                pkg_data = cursor.fetchone()
+
+                body_matrix_rel = None
+                body_mask_rel = None
+                t_w = None
+                t_h = None
+
+                tmpl = None
+                if isinstance(package_templates, dict):
+                    tmpl = package_templates.get(package_name)
+
+                if not pkg_data:
+                    # Pacote novo: tenta criar template, se o front mandou
+                    if tmpl:
+                        body_matrix_rel, body_mask_rel, t_w, t_h = build_package_template_from_frontend(
+                            tmpl, package_name
+                        )
+
+                    cursor.execute(
+                        """
+                        INSERT INTO packages (name, body_matrix, body_mask, template_roi_width, template_roi_height)
+                        VALUES (?, ?, ?, ?, ?)
+                        """,
+                        (package_name, body_matrix_rel, body_mask_rel, t_w, t_h)
+                    )
+                    pkg_id = cursor.lastrowid
+                    package_info[package_name] = {
+                        'id': pkg_id,
+                        'body_matrix': body_matrix_rel,
+                        'body_mask': body_mask_rel,
+                        'template_roi_width': t_w,
+                        'template_roi_height': t_h,
+                    }
+                else:
+                    # Pacote já existe
+                    body_matrix_rel = pkg_data['body_matrix']
+                    body_mask_rel = pkg_data['body_mask']
+                    t_w = pkg_data['template_roi_width']
+                    t_h = pkg_data['template_roi_height']
+
+                    # Se não tinha template ainda mas o front mandou agora, atualiza
+                    if tmpl and (body_matrix_rel is None or body_mask_rel is None):
+                        new_body_matrix_rel, new_body_mask_rel, new_w, new_h = build_package_template_from_frontend(
+                            tmpl, package_name
+                        )
+                        if new_body_matrix_rel and new_body_mask_rel:
+                            body_matrix_rel = new_body_matrix_rel
+                            body_mask_rel = new_body_mask_rel
+                            t_w = new_w
+                            t_h = new_h
+                            cursor.execute(
+                                """
+                                UPDATE packages
+                                SET body_matrix = ?, body_mask = ?, template_roi_width = ?, template_roi_height = ?
+                                WHERE id = ?
+                                """,
+                                (body_matrix_rel, body_mask_rel, t_w, t_h, pkg_data['id'])
+                            )
+
+                    package_info[package_name] = {
+                        'id': pkg_data['id'],
+                        'body_matrix': body_matrix_rel,
+                        'body_mask': body_mask_rel,
+                        'template_roi_width': t_w,
+                        'template_roi_height': t_h,
+                    }
+
+            pkg_id = package_info[package_name]['id']
+
+            # --- Insere componente ---
+            cursor.execute(
+                """
+                INSERT INTO components
+                (product_id, name, x, y, width, height, package_id, rotation, is_polarized, polarity_box, inspection_mask)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    product_id,
+                    comp_name,
+                    x, y, width, height,
+                    pkg_id,
+                    rotation,
+                    is_polarized,
+                    polarity_box,
+                    None  # inspection_mask ainda não usamos
+                )
+            )
+
+        conn.commit()
+        return jsonify({'message': 'Produto cadastrado com sucesso.', 'product_id': product_id})
+
+    except Exception as e:
+        conn.rollback()
+        traceback.print_exc()
+        return jsonify({'error': f'Erro ao cadastrar produto: {str(e)}'}), 500
+
+    finally:
+        cursor.close()
+        conn.close()
 
 @bp.route('/suggest_body', methods=['POST'])
 @login_required
@@ -546,3 +494,69 @@ def _rotate_template_and_mask(template_img, template_mask, rotation):
         template_mask = cv2.rotate(template_mask, cv2.ROTATE_90_COUNTERCLOCKWISE)
 
     return template_img, template_mask
+
+def build_package_template_from_frontend(tmpl, package_name):
+    """
+    Constrói e salva:
+      - body_matrix: ROI do corpo (imagem)
+      - body_mask: máscara binária (255 onde é corpo)
+      - template_roi_width/height: tamanho da ROI
+
+    tmpl vem do front, algo como:
+    {
+      "roi_b64": "data:image/png;base64,...",
+      "body_rects": [{x, y, width, height}, ...],
+      "base_rotation": 0
+    }
+    """
+    try:
+        if not tmpl:
+            return None, None, None, None
+
+        roi_b64 = tmpl.get('roi_b64')
+        body_rects = tmpl.get('body_rects') or []
+
+        if not roi_b64 or not body_rects:
+            return None, None, None, None
+
+        roi_img = base64_to_cv2_img(roi_b64)
+        if roi_img is None:
+            print(f"[build_package_template] Falha ao decodificar ROI para pacote {package_name}")
+            return None, None, None, None
+
+        h, w = roi_img.shape[:2]
+
+        # Máscara do mesmo tamanho da ROI: 255 apenas onde há corpo
+        mask = np.zeros((h, w), dtype=np.uint8)
+        for rect in body_rects:
+            x = int(rect.get('x', 0))
+            y = int(rect.get('y', 0))
+            rw = int(rect.get('width', 0))
+            rh = int(rect.get('height', 0))
+            if rw > 0 and rh > 0:
+                cv2.rectangle(mask, (x, y), (x + rw, y + rh), 255, -1)
+
+        mask_bgr = cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR)
+
+        safe_name = ''.join(c if c.isalnum() else '_' for c in str(package_name))[:40]
+        rand = uuid.uuid4().hex[:6]
+
+        body_matrix_rel = save_image_to_disk(
+            roi_img,
+            'uploads',
+            f"pkg_{safe_name}_body_{rand}"
+        )
+        body_mask_rel = save_image_to_disk(
+            mask_bgr,
+            'uploads',
+            f"pkg_{safe_name}_mask_{rand}"
+        )
+
+        print(f"[build_package_template] Template salvo para pacote '{package_name}':")
+        print(f"  body_matrix={body_matrix_rel}, body_mask={body_mask_rel}, w={w}, h={h}")
+
+        return body_matrix_rel, body_mask_rel, w, h
+
+    except Exception:
+        traceback.print_exc()
+        return None, None, None, None

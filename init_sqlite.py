@@ -16,21 +16,22 @@ if os.path.exists(db_path):
 
 # Schema das tabelas em SQLite (SEM dados)
 schema = """
-CREATE TABLE users (
+CREATE TABLE IF NOT EXISTS users (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   username TEXT NOT NULL,
   password_hash TEXT NOT NULL,
   UNIQUE (username)
 );
 
-CREATE TABLE products (
+CREATE TABLE IF NOT EXISTS products (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   name TEXT NOT NULL,
   golden_image TEXT NOT NULL,
-  fiducials TEXT NOT NULL
+  fiducials TEXT NOT NULL,
+  created_by TEXT
 );
 
-CREATE TABLE packages (
+CREATE TABLE IF NOT EXISTS packages (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   name TEXT NOT NULL,
   body_matrix TEXT DEFAULT NULL,
@@ -42,27 +43,32 @@ CREATE TABLE packages (
   UNIQUE (name)
 );
 
-CREATE TABLE components (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  product_id INTEGER NOT NULL,
-  name TEXT NOT NULL,
-  x INTEGER NOT NULL,
-  y INTEGER NOT NULL,
-  width INTEGER NOT NULL,
-  height INTEGER NOT NULL,
-  package_id INTEGER DEFAULT NULL,
-  rotation INTEGER NOT NULL DEFAULT 0,
-  inspection_mask TEXT DEFAULT NULL
+CREATE TABLE IF NOT EXISTS components (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    product_id INTEGER NOT NULL,
+    name TEXT NOT NULL,
+    x INTEGER NOT NULL,
+    y INTEGER NOT NULL,
+    width INTEGER NOT NULL,
+    height INTEGER NOT NULL,
+    package_id INTEGER,
+    rotation INTEGER NOT NULL DEFAULT 0,
+    inspection_mask TEXT DEFAULT NULL,
+    -- NOVOS CAMPOS
+    is_polarized INTEGER NOT NULL DEFAULT 0,
+    polarity_box TEXT DEFAULT NULL,
+    FOREIGN KEY (product_id) REFERENCES products(id),
+    FOREIGN KEY (package_id) REFERENCES packages(id)
 );
 
-CREATE TABLE inspections (
+CREATE TABLE IF NOT EXISTS inspections (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   product_id INTEGER NOT NULL,
   result TEXT DEFAULT 'IN_PROGRESS',
   timestamp TEXT NOT NULL DEFAULT current_timestamp
 );
 
-CREATE TABLE inspection_results (
+CREATE TABLE IF NOT EXISTS inspection_results (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   inspection_id INTEGER NOT NULL,
   component_id INTEGER NOT NULL,
@@ -75,7 +81,7 @@ CREATE TABLE inspection_results (
   produced_roi_image TEXT DEFAULT NULL
 );
 
-CREATE TABLE inspection_feedback (
+CREATE TABLE IF NOT EXISTS inspection_feedback (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   component_name TEXT NOT NULL,
   feedback TEXT NOT NULL,
@@ -84,15 +90,19 @@ CREATE TABLE inspection_feedback (
   inspection_id INTEGER NOT NULL
 );
 
-CREATE TABLE training_samples (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  product_id INTEGER NOT NULL,
-  component_id INTEGER NOT NULL,
-  golden_path TEXT DEFAULT NULL,
-  produced_path TEXT DEFAULT NULL,
-  label TEXT NOT NULL,
-  created_at TEXT NOT NULL DEFAULT current_timestamp
+CREATE TABLE IF NOT EXISTS training_samples (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    product_id INTEGER NOT NULL,
+    component_id INTEGER NOT NULL,
+    golden_path TEXT NOT NULL,
+    produced_path TEXT NOT NULL,
+    label TEXT NOT NULL,
+    sample_type TEXT NOT NULL DEFAULT 'BODY',
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (product_id) REFERENCES products(id),
+    FOREIGN KEY (component_id) REFERENCES components(id)
 );
+
 """
 
 # Cria o banco e executa o schema
