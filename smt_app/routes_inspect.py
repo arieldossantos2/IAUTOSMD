@@ -185,8 +185,37 @@ def inspect_board():
             # --------- Regra de decisão final ---------
             prob = ai_details.get('prob') or 0.0
             ia_ok = (ai_status == "OK" and prob >= 0.85)
-            # OR entre CV e IA (com prob >= 0.85)
-            final_status = "OK" if (cv_status == "OK" or ia_ok) else "FAIL"
+
+            # Regra de hard FAIL: se a chance de GOOD for <= 5%, o componente é FAIL
+            hard_fail_low_prob = (prob <= 0.05)
+
+            if hard_fail_low_prob:
+                final_status = "FAIL"
+            else:
+                # OR entre CV e IA (com prob >= 0.85)
+                final_status = "OK" if (cv_status == "OK" or ia_ok) else "FAIL"
+
+            # Completa ai_details com info de como ela foi usada
+            ai_details = ai_details or {}
+            ai_details.setdefault('prob', prob)
+            ai_details['used_in_final'] = bool(ia_ok and not hard_fail_low_prob)
+            ai_details['hard_fail_low_prob'] = bool(hard_fail_low_prob)
+            ai_details['decision_rule'] = (
+                "A IA só é considerada para virar o componente para OK se prob >= 0.85. "
+                "Se prob <= 0.05, o componente é forçado para FAIL. "
+                "Nos demais casos, ela é apenas apoio (CV domina a decisão)."
+            )
+            ai_details.setdefault(
+                'suggestion',
+                "IA sugere que o componente está OK (match com golden)." if ai_status == "OK"
+                else "IA sugere que o componente está com desvio em relação ao golden."
+            )
+
+            if final_status == "OK":
+                total_ok += 1
+            else:
+                total_fail += 1
+
 
             # Completa ai_details com info de como ela foi usada
             ai_details = ai_details or {}
@@ -201,17 +230,6 @@ def inspect_board():
                 "IA sugere que o componente está OK (match com golden)." if ai_status == "OK"
                 else "IA sugere que o componente está com desvio em relação ao golden."
             )
-
-            # --------- Regra de decisão final ---------
-            prob = ai_details.get('prob') or 0.0
-            ia_ok = (ai_status == "OK" and prob >= 0.85)
-            # OR entre CV e IA (com prob >= 0.85)
-            final_status = "OK" if (cv_status == "OK" or ia_ok) else "FAIL"
-
-            if final_status == "OK":
-                total_ok += 1
-            else:
-                total_fail += 1
 
             # Desenha retângulo no overlay
             x, y, w, h = comp['x'], comp['y'], comp['width'], comp['height']
