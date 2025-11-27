@@ -390,55 +390,138 @@ def _load_siamese_model():
     return _siamese_model
 
 def _get_siamese_model():
-    global _SIAMESE_MODEL
-    if _SIAMESE_MODEL is None:
-        model = SiameseNetwork().to(_DEVICE)
-        if os.path.exists(_SIAMESE_PATH):
-            try:
-                state_dict = torch.load(_SIAMESE_PATH, map_location=_DEVICE)
-                model.load_state_dict(state_dict)
-                print(f"[vision] Rede siamesa carregada de '{_SIAMESE_PATH}'.")
-            except Exception as e:
-                print(f"[vision] Erro ao carregar '{_SIAMESE_PATH}': {e}. Usando pesos aleatórios.")
-        else:
-            print(f"[vision] Arquivo '{_SIAMESE_PATH}' não encontrado. Usando pesos aleatórios.")
-        model.eval()
-        _SIAMESE_MODEL = model
-    return _SIAMESE_MODEL
-
-
-def predict_with_model(roi_p_bgr, roi_g_bgr=None):
     """
-    Usa a rede siamesa para comparar ROI Golden x ROI Produzida.
-
-    - roi_g_bgr: np.ndarray BGR da golden (obrigatório para inferência correta)
-    - roi_p_bgr: np.ndarray BGR da produzida
+    Carrega sempre a versão mais recente de siamese_model.pt.
+    (se quiser, depois a gente volta a cachear com um controle de timestamp)
     """
+    model = SiameseNetwork().to(_DEVICE)
+    if os.path.exists(_SIAMESE_PATH):
+        try:
+            state_dict = torch.load(_SIAMESE_PATH, map_location=_DEVICE)
+            model.load_state_dict(state_dict)
+            print(f"[vision] Rede siamesa carregada de '{_SIAMESE_PATH}'.")
+        except Exception as e:
+            print(f"[vision] Erro ao carregar '{_SIAMESE_PATH}': {e}. Usando pesos aleatórios.")
+    else:
+        print(f"[vision] Arquivo '{_SIAMESE_PATH}' não encontrado. Usando pesos aleatórios.")
+
+    model.eval()
+    return model
+
+def predict_with_model(
+    roi_g_bgr,
+    roi_p_bgr,
+    template_img=None,
+    template_mask=None,
+    polarity_box=None,
+    is_polarized=False,
+):
     model = _get_siamese_model()
 
-    # Se não mandarem ROI golden, fallback tosco: usa a própria produzida
+    # ------------ 1) fallback tosco se não mandarem golden ------------
     if roi_g_bgr is None:
         roi_g_bgr = roi_p_bgr
 
-    # Converte para tensores (3, H, W)
-    g_tensor = path_to_tensor(roi_g_bgr, is_path=False)
-    p_tensor = path_to_tensor(roi_p_bgr, is_path=False)
+    g_patch = roi_g_bgr
+    p_patch = roi_p_bgr
 
-    g_tensor = g_tensor.unsqueeze(0).to(_DEVICE)  # (1, 3, H, W)
+    # ------------ 2) extrai patch de corpo, se tiver template + máscara ------------
+    if template_img is not None and template_mask is not None:
+        g_patch = extract_body_patch_from_roi(roi_g_bgr, template_img, template_mask)
+        p_patch = extract_body_patch_from_roi(roi_p_bgr, template_img, template_mask)
+
+    # ------------ 3) se componente é polarizado, recorta só a região de polaridade ------------
+    if is_polarized and polarity_box is not None:
+        try:
+            pol = polarity_box
+            if isinstance(pol, str):
+                pol = json.loads(pol)
+
+            px = int(pol.get("x", 0))
+            py = int(pol.get("y", 0))
+            pw = int(pol.get("width", 0))
+            ph = int(pol.get("height", 0))
+
+            if pw > 0 and ph > 0:
+                h_g, w_g = g_patch.shape[:2]
+                h_p, w_p = p_patch.shape[:2]
+
+                px_end_g = min(px + pw, w_g)
+                py_end_g = min(py + ph, h_g)
+                px_end_p = min(px + pw, w_p)
+                py_end_p = min(py + ph, h_p)
+
+                if px < w_g and py < h_g and px < w_p and py < h_p:
+                    g_pol = g_patch[py:py_end_g, px:px_end_g]
+                    p_pol = p_patch[py:py_end_p, px:px_end_p]
+                    if g_pol.size > 0 and p_pol.size > 0:
+                        g_patch, p_patch = g_pol, p_pol
+        except Exception as e:
+            print(f"[predict_with_model] Erro ao recortar polaridade: {e}")
+            # fallback: mantém patch de corpo
+
+    # ------------ 4) tensoriza patches ------------
+    g_tensor = path_to_tensor(g_patch, is_path=False)
+    p_tensor = path_to_tensor(p_patch, is_path=False)
+
+    g_tensor = g_tensor.unsqueeze(0).to(_DEVICE)
     p_tensor = p_tensor.unsqueeze(0).to(_DEVICE)
 
     with torch.no_grad():
         prob_good = model(g_tensor, p_tensor).item()
 
     prob_good = float(prob_good)
-    threshold = 0.5   # pode ajustar depois (ex: 0.6 / 0.7)
+    threshold = 0.5  # por enquanto mantém; depois ajustamos
 
     ai_status = "OK" if prob_good >= threshold else "FAIL"
 
     ai_details = {
         "prob": prob_good,
         "threshold": threshold,
-        "source": "siamese_model.pt",
+        "source": _SIAMESE_PATH,
     }
 
+    print(f"[predict_with_model] prob={prob_good:.4f} status={ai_status}")
+
     return ai_status, ai_details
+
+
+def extract_body_patch_from_roi(roi_img, template_img, template_mask):
+    """
+    Mesmo conceito do train_model: usa matchTemplate + máscara pra extrair o patch de corpo.
+    Se der problema por qualquer motivo, devolve a ROI inteira.
+    """
+    try:
+        if roi_img is None or template_img is None or template_mask is None:
+            return roi_img
+
+        roi = roi_img.copy()
+        tpl = template_img.copy()
+        msk = template_mask.copy()
+
+        h_t, w_t = tpl.shape[:2]
+        h_r, w_r = roi.shape[:2]
+
+        if h_r < h_t or w_r < w_t:
+            return roi
+
+        res = cv2.matchTemplate(
+            roi,
+            tpl,
+            cv2.TM_SQDIFF_NORMED,
+            mask=msk
+        )
+        min_val, max_val, min_loc, max_loc = cv2.minMaxLoc(res)
+        x_best, y_best = min_loc
+
+        x_end = min(x_best + w_t, w_r)
+        y_end = min(y_best + h_t, h_r)
+
+        patch = roi[y_best:y_end, x_best:x_end]
+        if patch is None or patch.size == 0:
+            return roi
+        return patch
+
+    except Exception as e:
+        print(f"[vision.extract_body_patch_from_roi] Erro: {e}")
+        return roi_img

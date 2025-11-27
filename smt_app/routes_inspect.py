@@ -173,7 +173,14 @@ def inspect_board():
                 # ai_status, ai_details = predict_with_model(roi_p)
 
                 # ✅ AGORA: passa golden + produced para a rede siamesa
-                ai_status, ai_details = predict_with_model(roi_g, roi_p)
+                ai_status, ai_details = predict_with_model(
+                    roi_g,
+                    roi_p,
+                    template_img=template_img,
+                    template_mask=template_mask,
+                    polarity_box=comp.get('polarity_box'),
+                    is_polarized=bool(comp.get('is_polarized', 0)),
+                )
 
             # --------- Regra de decisão final ---------
             prob = ai_details.get('prob') or 0.0

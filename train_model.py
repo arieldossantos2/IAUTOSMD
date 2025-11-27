@@ -101,6 +101,47 @@ def path_to_tensor(data, is_path=True, size=(64, 64)) -> torch.Tensor:
         print(f"[path_to_tensor] Erro ao processar imagem: {e}")
         return torch.zeros(3, size[1], size[0])
 
+def extract_body_patch_from_roi(roi_img, template_img, template_mask):
+    """
+    Usa o mesmo conceito do analyze_component_package_based:
+      - matchTemplate SQDIFF_NORMED com máscara
+      - recorta o patch de corpo alinhado ao melhor match.
+    Se der qualquer problema, retorna a ROI inteira como fallback.
+    """
+    try:
+        if roi_img is None or template_img is None or template_mask is None:
+            return roi_img
+
+        roi = roi_img.copy()
+        tpl = template_img.copy()
+        msk = template_mask.copy()
+
+        h_t, w_t = tpl.shape[:2]
+        h_r, w_r = roi.shape[:2]
+
+        if h_r < h_t or w_r < w_t:
+            return roi
+
+        res = cv2.matchTemplate(
+            roi,
+            tpl,
+            cv2.TM_SQDIFF_NORMED,
+            mask=msk
+        )
+        min_val, max_val, min_loc, max_loc = cv2.minMaxLoc(res)
+        x_best, y_best = min_loc
+
+        x_end = min(x_best + w_t, w_r)
+        y_end = min(y_best + h_t, h_r)
+
+        patch = roi[y_best:y_end, x_best:x_end]
+        if patch is None or patch.size == 0:
+            return roi
+        return patch
+    except Exception as e:
+        print(f"[extract_body_patch_from_roi] Erro: {e}")
+        return roi_img
+
 
 # ============================================================
 # 3) Dataset para REDE SIAMESA
@@ -117,6 +158,10 @@ class SiameseDataset(Dataset):
             'label': float (1.0 = GOOD, 0.0 = FAIL),
             'is_polarized': int (0/1),
             'sample_type': str,
+            'body_matrix_path': str ou None,
+            'body_mask_path': str ou None,
+            'polarity_box': str (JSON) ou dict ou None,
+            'patch_type': 'BODY' ou 'POLARITY'
           }
         """
         self.samples = samples
@@ -127,13 +172,70 @@ class SiameseDataset(Dataset):
     def __getitem__(self, idx):
         s = self.samples[idx]
 
-        g_tensor = path_to_tensor(s["golden_path"], is_path=True)
-        p_tensor = path_to_tensor(s["produced_path"], is_path=True)
+        g_img = cv2.imread(s["golden_path"])
+        p_img = cv2.imread(s["produced_path"])
+
+        if g_img is None or p_img is None:
+            # fallback: tensor vazio, pra não quebrar o DataLoader
+            g_tensor = path_to_tensor(None, is_path=False)
+            p_tensor = path_to_tensor(None, is_path=False)
+            y = torch.tensor(float(s["label"]), dtype=torch.float32)
+            return g_tensor, p_tensor, y
+
+        patch_type = s.get("patch_type", "BODY")
+        tpl_path = s.get("body_matrix_path")
+        msk_path = s.get("body_mask_path")
+
+        # 1) Extrai patch de CORPO (se tiver template); senão, usa ROI inteira
+        if tpl_path and msk_path and os.path.exists(tpl_path) and os.path.exists(msk_path):
+            template_img = cv2.imread(tpl_path)
+            template_mask = cv2.imread(msk_path, cv2.IMREAD_GRAYSCALE)
+            if template_img is not None and template_mask is not None:
+                g_patch = extract_body_patch_from_roi(g_img, template_img, template_mask)
+                p_patch = extract_body_patch_from_roi(p_img, template_img, template_mask)
+            else:
+                g_patch, p_patch = g_img, p_img
+        else:
+            g_patch, p_patch = g_img, p_img
+
+        # 2) Se for amostra de POLARIDADE, recorta apenas a região de polaridade
+        if patch_type == "POLARITY":
+            pol = s.get("polarity_box")
+            if pol is not None:
+                try:
+                    if isinstance(pol, str):
+                        pol = json.loads(pol)
+                    px = int(pol.get("x", 0))
+                    py = int(pol.get("y", 0))
+                    pw = int(pol.get("width", 0))
+                    ph = int(pol.get("height", 0))
+
+                    if pw > 0 and ph > 0:
+                        h_g, w_g = g_patch.shape[:2]
+                        h_p, w_p = p_patch.shape[:2]
+
+                        px_end_g = min(px + pw, w_g)
+                        py_end_g = min(py + ph, h_g)
+                        px_end_p = min(px + pw, w_p)
+                        py_end_p = min(py + ph, h_p)
+
+                        if px < w_g and py < h_g and px < w_p and py < h_p:
+                            g_pol = g_patch[py:py_end_g, px:px_end_g]
+                            p_pol = p_patch[py:py_end_p, px:px_end_p]
+                            # Só usa se o recorte for válido
+                            if g_pol.size > 0 and p_pol.size > 0:
+                                g_patch, p_patch = g_pol, p_pol
+                except Exception as e:
+                    print(f"[SiameseDataset] Erro ao recortar polaridade: {e}")
+                    # fallback: continua com patch de corpo
+
+        # 3) Converte os patches em tensores
+        g_tensor = path_to_tensor(g_patch, is_path=False)
+        p_tensor = path_to_tensor(p_patch, is_path=False)
 
         y = torch.tensor(float(s["label"]), dtype=torch.float32)
 
         return g_tensor, p_tensor, y
-
 
 # ============================================================
 # 4) Arquitetura da Rede Siamesa
@@ -145,7 +247,6 @@ class SiameseNetwork(nn.Module):
     def __init__(self, embedding_dim: int = 256):
         super().__init__()
 
-        # Mesma base convolucional do seu MultiTaskCNN (64x64 -> 64 x 8 x 8) :contentReference[oaicite:5]{index=5}
         self.backbone = nn.Sequential(
             nn.Conv2d(3, 16, 3, padding=1), nn.ReLU(), nn.MaxPool2d(2),   # 32x32
             nn.Conv2d(16, 32, 3, padding=1), nn.ReLU(), nn.MaxPool2d(2),  # 16x16
@@ -161,7 +262,6 @@ class SiameseNetwork(nn.Module):
             nn.ReLU()
         )
 
-        # Head siamesa: recebe |f1 - f2|
         self.siamese_head = nn.Sequential(
             nn.Linear(embedding_dim, 128),
             nn.ReLU(),
@@ -170,39 +270,31 @@ class SiameseNetwork(nn.Module):
         )
 
     def forward_once(self, x):
-        """Extrai o embedding de UMA imagem."""
         feat = self.backbone(x)
         emb = self.embedding(feat)
         return emb
 
     def forward(self, x1, x2):
-        """
-        Forward siamesa padrão:
-          x1 = golden
-          x2 = produced
-        Retorna probabilidade de serem "iguais" (GOOD).
-        """
         f1 = self.forward_once(x1)
         f2 = self.forward_once(x2)
-
         diff = torch.abs(f1 - f2)
         prob = self.siamese_head(diff).squeeze()
         return prob
-
 
 # ============================================================
 # 5) Carregar amostras do banco de dados
 # ============================================================
 
-def load_siamese_samples_from_db(max_samples: int = 5000) -> List[Dict]:
+def load_siamese_samples_from_db(max_samples: int = 50000) -> List[Dict]:
     """
-    Lê training_samples + components no SQLite e resolve caminhos das imagens.
-    Dá um leve oversampling em componentes polarizados para reforçar polaridade.
+    Lê training_samples + components + packages no SQLite e resolve caminhos das imagens.
+    Agora, em vez de usar a ROI inteira, vamos treinar em:
+      - patch de CORPO (body) para todos
+      - patch de POLARIDADE para componentes polarizados (oversampling)
     """
     conn = get_db_connection()
     cur = conn.cursor()
 
-    # Pegamos também info de componente (is_polarized, polarity_box)
     query = """
         SELECT
             ts.id,
@@ -211,9 +303,12 @@ def load_siamese_samples_from_db(max_samples: int = 5000) -> List[Dict]:
             ts.label,
             ts.sample_type,
             c.is_polarized,
-            c.polarity_box
+            c.polarity_box,
+            p.body_matrix,
+            p.body_mask
         FROM training_samples ts
         JOIN components c ON c.id = ts.component_id
+        JOIN packages p   ON c.package_id = p.id
         WHERE ts.golden_path IS NOT NULL
           AND ts.produced_path IS NOT NULL
           AND ts.label IN ('GOOD', 'FAIL')
@@ -235,8 +330,13 @@ def load_siamese_samples_from_db(max_samples: int = 5000) -> List[Dict]:
         is_polarized = int(row["is_polarized"] or 0)
         sample_type = row["sample_type"] or "BODY"
 
+        body_matrix_rel = row["body_matrix"]
+        body_mask_rel   = row["body_mask"]
+
         g_abs = resolve_image_path(g_rel)
         p_abs = resolve_image_path(p_rel)
+        body_matrix_abs = resolve_image_path(body_matrix_rel) if body_matrix_rel else None
+        body_mask_abs   = resolve_image_path(body_mask_rel)   if body_mask_rel else None
 
         if not g_abs or not p_abs:
             missing += 1
@@ -247,24 +347,43 @@ def load_siamese_samples_from_db(max_samples: int = 5000) -> List[Dict]:
 
         y = label_map[label_str]
 
-        base_sample = {
+        common = {
             "golden_path": g_abs,
             "produced_path": p_abs,
             "label": y,
             "is_polarized": is_polarized,
             "sample_type": sample_type,
+            "body_matrix_path": body_matrix_abs,
+            "body_mask_path": body_mask_abs,
+            "polarity_box": row["polarity_box"],  # pode ser JSON string ou None
         }
 
-        # Amostra original
-        samples.append(base_sample)
+        # ---------- 1) Sempre gera amostra de CORPO ----------
+        body_sample = dict(common)
+        body_sample["patch_type"] = "BODY"
+        samples.append(body_sample)
 
-        # Oversampling leve em componentes polarizados (aprende melhor polaridade)
-        if is_polarized == 1:
-            samples.append(base_sample.copy())
+        # Leve oversampling de FAIL (ajuda a balancear GOOD/FAIL)
+        if y == 0.0:
+            samples.append(dict(body_sample))
 
-    print(f"[load_siamese_samples_from_db] Amostras carregadas: {len(samples)} (descartadas por caminho inválido: {missing})")
+        # ---------- 2) Amostras de POLARIDADE para componentes polarizados ----------
+        if (
+            is_polarized == 1
+            and row["polarity_box"]
+            and body_matrix_abs is not None
+            and body_mask_abs is not None
+        ):
+            pol_sample = dict(common)
+            pol_sample["patch_type"] = "POLARITY"
+            # Oversampling forte da polaridade: 3x
+            samples.append(pol_sample)
+            samples.append(dict(pol_sample))
+            samples.append(dict(pol_sample))
+
+    print(f"[load_siamese_samples_from_db] Amostras carregadas (com oversampling): {len(samples)} "
+          f"(descartadas por caminho inválido: {missing})")
     return samples
-
 
 # ============================================================
 # 6) Loop de treinamento da rede siamesa
