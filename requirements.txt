@@ -1,15 +1,18 @@
-flask
-flask-login
-opencv-python
-numpy
-mysql-connector-python
-scikit-image
+Requirements: Python
 
+Na pasta do arquivo, no terminal:
 
-# python -m venv venv
+Para iniciar o virtual env:
 # Windows
 venv\Scripts\activate
 # Linux/Mac
-# source .venv/bin/activate
+source .venv/bin/activate
 
-pip install flask flask-login opencv-python numpy torch scikit-image
+Para iniciar com o banco de dados atual:
+python run.py
+
+
+Se quiser começar do zero, pode iniciar um banco de dados novo, apagando/renomeando o instance/smt_inspection_new.db
+
+Para iniciar um banco de dados do zero:
+python init_sqlite.py

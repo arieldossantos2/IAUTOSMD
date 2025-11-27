@@ -83,7 +83,6 @@ def inspect_board():
         # align_with_fiducials já sabe lidar com lista vazia (faz apenas resize)
         produced_aligned = align_with_fiducials(golden_full, produced_full, fiducials_data)
 
-
         if produced_aligned is None:
             cursor.close()
             conn.close()
@@ -136,7 +135,7 @@ def inspect_board():
             presence_threshold = comp.get('presence_threshold', 0.35)
             ssim_threshold = comp.get('ssim_threshold', 0.60)
 
-            # Sempre inicializa esses caras para evitar UnboundLocalError
+            # Inicializa estados
             cv_status = 'UNKNOWN'
             cv_msg = ''
             cv_analysis = {
@@ -148,13 +147,33 @@ def inspect_board():
             }
             ai_status = 'UNKNOWN'
             ai_details = {'prob': 0.0}
+            final_status = 'FAIL'  # default conservador
 
+            # =======================
+            # VISÃO COMPUTACIONAL
+            # =======================
             if template_img is None or template_mask is None:
                 print(f"ERRO: Não foi possível ler template/máscara para {comp['name']}")
                 cv_status = 'FAIL'
                 cv_msg = "Arquivo de template/máscara do pacote não encontrado."
                 cv_analysis['status'] = 'FAIL'
                 cv_analysis['details'] = {'message': cv_msg}
+
+                # Nesse caso, IA não é usada; final_status permanece FAIL
+                ai_status = 'UNKNOWN'
+                ai_details = {
+                    'prob': 0.0,
+                    'used_in_final': False,
+                    'hard_fail_low_prob': False,
+                    'decision_rule': (
+                        "IA pode virar o componente para OK se prob >= 0.85, "
+                        "ou virar para FAIL se prob <= 0.05. "
+                        "Caso contrário, a decisão segue a visão computacional."
+                    ),
+                    'suggestion': "IA não foi utilizada porque o template/máscara está ausente.",
+                    'influence_text': "ℹ️ IA não foi utilizada para este componente."
+                }
+                final_status = 'FAIL'
             else:
                 cv_analysis = analyze_component_package_based(
                     roi_g,
@@ -169,10 +188,9 @@ def inspect_board():
                 cv_status = cv_analysis.get('status', 'FAIL')
                 cv_msg = cv_analysis.get('details', {}).get('message', '')
 
-                # 🔴 ANTES:
-                # ai_status, ai_details = predict_with_model(roi_p)
-
-                # ✅ AGORA: passa golden + produced para a rede siamesa
+                # =======================
+                # IA SIAMESA
+                # =======================
                 ai_status, ai_details = predict_with_model(
                     roi_g,
                     roi_p,
@@ -182,54 +200,51 @@ def inspect_board():
                     is_polarized=bool(comp.get('is_polarized', 0)),
                 )
 
-            # --------- Regra de decisão final ---------
-            prob = ai_details.get('prob') or 0.0
-            ia_ok = (ai_status == "OK" and prob >= 0.85)
+                prob = ai_details.get('prob') or 0.0
 
-            # Regra de hard FAIL: se a chance de GOOD for <= 5%, o componente é FAIL
-            hard_fail_low_prob = (prob <= 0.05)
+                ia_ok = (ai_status == "OK" and prob >= 0.85)
+                ia_fail = (ai_status == "FAIL" and prob <= 0.05)
 
-            if hard_fail_low_prob:
-                final_status = "FAIL"
-            else:
-                # OR entre CV e IA (com prob >= 0.85)
-                final_status = "OK" if (cv_status == "OK" or ia_ok) else "FAIL"
+                # Regra final:
+                # 1) IA pode virar para OK (prob >= 0.85)
+                # 2) IA pode virar para FAIL (prob <= 0.05)
+                # 3) Caso contrário CV decide
+                if ia_ok:
+                    final_status = "OK"
+                elif ia_fail:
+                    final_status = "FAIL"
+                else:
+                    final_status = cv_status
 
-            # Completa ai_details com info de como ela foi usada
-            ai_details = ai_details or {}
-            ai_details.setdefault('prob', prob)
-            ai_details['used_in_final'] = bool(ia_ok and not hard_fail_low_prob)
-            ai_details['hard_fail_low_prob'] = bool(hard_fail_low_prob)
-            ai_details['decision_rule'] = (
-                "A IA só é considerada para virar o componente para OK se prob >= 0.85. "
-                "Se prob <= 0.05, o componente é forçado para FAIL. "
-                "Nos demais casos, ela é apenas apoio (CV domina a decisão)."
-            )
-            ai_details.setdefault(
-                'suggestion',
-                "IA sugere que o componente está OK (match com golden)." if ai_status == "OK"
-                else "IA sugere que o componente está com desvio em relação ao golden."
-            )
+                # Completa ai_details com info de como ela foi usada
+                ai_details = ai_details or {}
+                ai_details.setdefault('prob', prob)
+                ai_details['used_in_final'] = bool(ia_ok or ia_fail)
+                ai_details['hard_fail_low_prob'] = bool(ia_fail)
+                ai_details['decision_rule'] = (
+                    "IA pode virar o componente para OK se prob >= 0.85, "
+                    "ou virar para FAIL se prob <= 0.05. "
+                    "Caso contrário, a decisão final segue a visão computacional."
+                )
 
+                if ia_ok:
+                    ai_details['influence_text'] = "✅ A IA determinou que o componente está OK (prob >= 0.85)."
+                elif ia_fail:
+                    ai_details['influence_text'] = "⚠️ A IA determinou que o componente está FAIL (prob <= 0.05)."
+                else:
+                    ai_details['influence_text'] = "ℹ️ A opinião da IA NÃO mudou a decisão final; foi apenas um apoio à visão computacional."
+
+                ai_details.setdefault(
+                    'suggestion',
+                    "IA sugere que o componente está OK (match com golden)." if ai_status == "OK"
+                    else "IA sugere que o componente está com desvio em relação ao golden."
+                )
+
+            # Contagem geral
             if final_status == "OK":
                 total_ok += 1
             else:
                 total_fail += 1
-
-
-            # Completa ai_details com info de como ela foi usada
-            ai_details = ai_details or {}
-            ai_details.setdefault('prob', prob)
-            ai_details['used_in_final'] = bool(ia_ok)
-            ai_details['decision_rule'] = (
-                "A IA só é considerada para virar o componente para OK se prob >= 0.85. "
-                "Caso contrário, ela é apenas apoio (CV domina a decisão)."
-            )
-            ai_details.setdefault(
-                'suggestion',
-                "IA sugere que o componente está OK (match com golden)." if ai_status == "OK"
-                else "IA sugere que o componente está com desvio em relação ao golden."
-            )
 
             # Desenha retângulo no overlay
             x, y, w, h = comp['x'], comp['y'], comp['width'], comp['height']
@@ -285,6 +300,7 @@ def inspect_board():
             }
 
             detailed_components_frontend.append(comp_data_for_frontend)
+
         overall_status = "OK" if total_fail == 0 else "FAIL"
         cursor.execute("UPDATE inspections SET result = ? WHERE id = ?", (overall_status, inspection_id))
         conn.commit()
@@ -297,7 +313,6 @@ def inspect_board():
         return jsonify({
             'total_ok': total_ok, 'total_fail': total_fail,
             'detailed_components': detailed_components_frontend,
-            # Retorna o caminho relativo para o JS
             'result_image_url': url_for('static', filename=result_filename_db),
             'product_id': product_id
         })

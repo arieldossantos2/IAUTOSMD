@@ -390,7 +390,7 @@ def load_siamese_samples_from_db(max_samples: int = 50000) -> List[Dict]:
 # ============================================================
 
 def train_siamese(
-    max_samples: int = 5000,
+    max_samples: int = 50000,
     batch_size: int = 16,
     num_epochs: int = 20,
     lr: float = 5e-4,
@@ -461,6 +461,8 @@ def train_siamese(
         # ---------------------------
         model.train()
         total_train_loss = 0.0
+        correct_train = 0
+        total_train = 0
 
         for g_imgs, p_imgs, labels in train_loader:
             g_imgs = g_imgs.to(device)
@@ -468,22 +470,32 @@ def train_siamese(
             labels = labels.to(device)
 
             optimizer.zero_grad()
-            probs = model(g_imgs, p_imgs)
+
+            probs = model(g_imgs, p_imgs)   # (batch,) ou escalar
+            probs = probs.view(-1)          # garante (N,)
+            labels = labels.view_as(probs)  # mesma shape do probs
+
             loss = criterion(probs, labels)
+
+            preds = (probs > 0.5).float()
+            correct_train += (preds == labels).sum().item()
+            total_train += labels.numel()
+
             loss.backward()
             optimizer.step()
 
             total_train_loss += loss.item()
 
         avg_train_loss = total_train_loss / max(1, len(train_loader))
+        train_acc = 100.0 * correct_train / max(1, total_train)
 
         # ---------------------------
         # Fase de Validação
         # ---------------------------
         model.eval()
         total_val_loss = 0.0
-        correct = 0
-        total = 0
+        correct_val = 0
+        total_val = 0
 
         with torch.no_grad():
             for g_imgs, p_imgs, labels in val_loader:
@@ -492,18 +504,22 @@ def train_siamese(
                 labels = labels.to(device)
 
                 probs = model(g_imgs, p_imgs)
+                probs = probs.view(-1)
+                labels = labels.view_as(probs)
+
                 loss = criterion(probs, labels)
                 total_val_loss += loss.item()
 
                 preds = (probs > 0.5).float()
-                correct += (preds == labels).sum().item()
-                total += labels.numel()
+                correct_val += (preds == labels).sum().item()
+                total_val += labels.numel()
 
         avg_val_loss = total_val_loss / max(1, len(val_loader))
-        val_acc = 100.0 * correct / max(1, total)
+        val_acc = 100.0 * correct_val / max(1, total_val)
 
         print(f"[Epoch {epoch}/{num_epochs}] "
               f"Train Loss: {avg_train_loss:.4f} | "
+              f"Train Acc: {train_acc:.2f}% | "
               f"Val Loss: {avg_val_loss:.4f} | "
               f"Val Acc: {val_acc:.2f}%")
 
@@ -521,7 +537,6 @@ def train_siamese(
                 break
 
     print("[train_siamese] Treinamento concluído.")
-
 
 # ============================================================
 # 7) Ponto de entrada do script
